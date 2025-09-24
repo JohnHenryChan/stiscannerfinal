@@ -1,0 +1,77 @@
+{
+  "name": "scanner-admin",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@date-io/dayjs": "^3.2.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@fullcalendar/core": "^6.1.15",
+    "@fullcalendar/daygrid": "^6.1.15",
+    "@fullcalendar/list": "^6.1.15",
+    "@fullcalendar/timegrid": "^6.1.15",
+    "@heroicons/react": "^2.2.0",
+    "@mui/icons-material": "^6.4.6",
+    "@mui/lab": "^6.0.0-beta.30",
+    "@mui/material": "^6.4.11",
+    "@mui/x-data-grid": "^7.27.2",
+    "@mui/x-date-pickers": "^7.27.3",
+    "@shadcn/ui": "^0.0.4",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^13.5.0",
+    "date-fns": "^4.1.0",
+    "dayjs": "^1.11.13",
+    "face-api.js": "^0.22.2",
+    "firebase": "^11.6.1",
+    "formik": "^2.4.6",
+    "jspdf": "^3.0.2",
+    "jspdf-autotable": "^5.0.2",
+    "lucide-react": "^0.477.0",
+    "react": "^19.0.0",
+    "react-calendar": "^6.0.0",
+    "react-circular-progressbar": "^2.2.0",
+    "react-datepicker": "^8.3.0",
+    "react-dom": "^19.0.0",
+    "react-icons": "^5.5.0",
+    "react-pro-sidebar": "^1.1.0",
+    "react-router-dom": "^6.30.0",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.15.2",
+    "web-vitals": "^2.1.4",
+    "xlsx": "^0.18.5",
+    "yup": "^1.6.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.21",
+    "css": "^3.0.0",
+    "post": "^0.0.1",
+    "tailwind": "^4.0.0",
+    "tailwindcss": "^3.4.17"
+  }
+}
