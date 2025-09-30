@@ -23,6 +23,7 @@
     "@testing-library/user-event": "^13.5.0",
     "date-fns": "^4.1.0",
     "dayjs": "^1.11.13",
+    "exceljs": "^4.4.0",
     "face-api.js": "^0.22.2",
     "firebase": "^11.6.1",
     "formik": "^2.4.6",

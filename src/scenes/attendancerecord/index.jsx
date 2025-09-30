@@ -5,7 +5,7 @@ import { MdSearch } from "react-icons/md";
 import { db } from "../../firebaseConfig";
 import { collection, getDocs, doc } from "firebase/firestore";
 import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable"; // ✅ fixed import
+import autoTable from "jspdf-autotable";
 
 const AttendanceRecord = () => {
   const getToday = () => new Date().toISOString().split("T")[0];
@@ -20,6 +20,12 @@ const AttendanceRecord = () => {
   const [yearLevels, setYearLevels] = useState([]);
   const [page, setPage] = useState(1);
   const rowsPerPage = 30;
+
+  // Toggle Flat vs Grouped view
+  const [groupedView, setGroupedView] = useState(false);
+
+  // Sorting state
+  const [sortConfig, setSortConfig] = useState({ key: null, direction: null });
 
   // Fetch subjects
   useEffect(() => {
@@ -115,8 +121,35 @@ const AttendanceRecord = () => {
     return searchMatch && subjectMatch && remarkMatch && yearMatch;
   });
 
-  const totalPages = Math.ceil(filteredRows.length / rowsPerPage);
-  const paginatedRows = filteredRows.slice(
+  // Sorting logic
+  const sortedRows = React.useMemo(() => {
+    if (!sortConfig.key || !sortConfig.direction) return filteredRows;
+
+    return [...filteredRows].sort((a, b) => {
+      if (a[sortConfig.key] < b[sortConfig.key]) {
+        return sortConfig.direction === "asc" ? -1 : 1;
+      }
+      if (a[sortConfig.key] > b[sortConfig.key]) {
+        return sortConfig.direction === "asc" ? 1 : -1;
+      }
+      return 0;
+    });
+  }, [filteredRows, sortConfig]);
+
+  const requestSort = (key) => {
+    setSortConfig((prev) => {
+      if (prev.key === key && prev.direction === "asc") {
+        return { key, direction: "desc" };
+      }
+      if (prev.key === key && prev.direction === "desc") {
+        return { key: null, direction: null }; // reset to unsorted
+      }
+      return { key, direction: "asc" };
+    });
+  };
+
+  const totalPages = Math.ceil(sortedRows.length / rowsPerPage);
+  const paginatedRows = sortedRows.slice(
     (page - 1) * rowsPerPage,
     page * rowsPerPage
   );
@@ -141,12 +174,19 @@ const AttendanceRecord = () => {
     setSelectedYears([]);
   };
 
+  // Grouped rows
+  const groupedRows = sortedRows.reduce((acc, row) => {
+    if (!acc[row.subject]) acc[row.subject] = [];
+    acc[row.subject].push(row);
+    return acc;
+  }, {});
+
   // Export CSV
   const exportCSV = () => {
     const headers = [
       "Date,Student ID,Student Name,Subject,Year Level,Time In,Remarks",
     ];
-    const rows = filteredRows.map(
+    const rows = sortedRows.map(
       (r) =>
         `${r.date},${r.studentId},${r.studentName},${r.subject},${r.yearLevel},${r.timeIn},${r.remark}`
     );
@@ -167,7 +207,7 @@ const AttendanceRecord = () => {
     autoTable(doc, {
       startY: 20,
       head: [["Date", "Student ID", "Name", "Subject", "Year", "Time In", "Remark"]],
-      body: filteredRows.map((r) => [
+      body: sortedRows.map((r) => [
         r.date,
         r.studentId,
         r.studentName,
@@ -185,7 +225,7 @@ const AttendanceRecord = () => {
   const exportXML = () => {
     const xmlContent = ["<attendance>"]
       .concat(
-        filteredRows.map(
+        sortedRows.map(
           (r) => `  <record>
     <date>${r.date}</date>
     <studentId>${r.studentId}</studentId>
@@ -210,6 +250,21 @@ const AttendanceRecord = () => {
 
   const subjectOptions = subjectList.map((s) => s.subject).filter(Boolean);
 
+  const SortHeader = ({ label, columnKey }) => {
+    let arrow = "";
+    if (sortConfig.key === columnKey) {
+      arrow = sortConfig.direction === "asc" ? " ↑" : sortConfig.direction === "desc" ? " ↓" : "";
+    }
+    return (
+      <th
+        className="border px-4 py-2 cursor-pointer select-none"
+        onClick={() => requestSort(columnKey)}
+      >
+        {label}{arrow}
+      </th>
+    );
+  };
+
   return (
     <div className="flex flex-col min-h-screen bg-gray-100">
       <TopbarAdmin />
@@ -217,6 +272,16 @@ const AttendanceRecord = () => {
         <SidebarAdmin />
         <div className="flex-1 p-6">
           <h1 className="text-3xl font-semibold mb-6">Attendance Record</h1>
+
+          {/* Toggle Flat/Grouped */}
+          <div className="flex items-center mb-4">
+            <label className="mr-2 font-medium">Grouped View:</label>
+            <input
+              type="checkbox"
+              checked={groupedView}
+              onChange={(e) => setGroupedView(e.target.checked)}
+            />
+          </div>
 
           {/* Filters */}
           <div className="flex justify-between items-center mb-4 gap-2 flex-wrap">
@@ -333,70 +398,113 @@ const AttendanceRecord = () => {
           </div>
 
           {/* Table */}
-          <div className="overflow-x-auto shadow rounded-lg bg-white">
-            <table className="min-w-full border border-gray-300 text-left text-sm">
-              <thead className="bg-gray-100 font-semibold">
-                <tr>
-                  <th className="border px-4 py-2">Date</th>
-                  <th className="border px-4 py-2">Student ID</th>
-                  <th className="border px-4 py-2">Student Name</th>
-                  <th className="border px-4 py-2">Subject</th>
-                  <th className="border px-4 py-2">Year Level</th>
-                  <th className="border px-4 py-2">Time In</th>
-                  <th className="border px-4 py-2">Remarks</th>
-                </tr>
-              </thead>
-              <tbody>
-                {paginatedRows.map((row, index) => {
-                  const remarkColor = getRemarkTextColor(row.remark);
-                  return (
-                    <tr key={index} className="border-t hover:bg-gray-50">
-                      <td className="border px-4 py-2">{row.date}</td>
-                      <td className="border px-4 py-2">{row.studentId}</td>
-                      <td className="border px-4 py-2">{row.studentName}</td>
-                      <td className="border px-4 py-2">{row.subject}</td>
-                      <td className="border px-4 py-2">{row.yearLevel}</td>
-                      <td className="border px-4 py-2">{row.timeIn}</td>
-                      <td className={`border px-4 py-2 font-medium ${remarkColor}`}>
-                        {row.remark}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {!groupedView ? (
+            <div className="overflow-x-auto shadow rounded-lg bg-white">
+              <table className="min-w-full border border-gray-300 text-left text-sm">
+                <thead className="bg-gray-100 font-semibold">
+                  <tr>
+                    <SortHeader label="Date" columnKey="date" />
+                    <SortHeader label="Student ID" columnKey="studentId" />
+                    <SortHeader label="Student Name" columnKey="studentName" />
+                    <SortHeader label="Subject" columnKey="subject" />
+                    <SortHeader label="Year Level" columnKey="yearLevel" />
+                    <SortHeader label="Time In" columnKey="timeIn" />
+                    <SortHeader label="Remarks" columnKey="remark" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedRows.map((row, index) => {
+                    const remarkColor = getRemarkTextColor(row.remark);
+                    return (
+                      <tr key={index} className="border-t hover:bg-gray-50">
+                        <td className="border px-4 py-2">{row.date}</td>
+                        <td className="border px-4 py-2">{row.studentId}</td>
+                        <td className="border px-4 py-2">{row.studentName}</td>
+                        <td className="border px-4 py-2">{row.subject}</td>
+                        <td className="border px-4 py-2">{row.yearLevel}</td>
+                        <td className="border px-4 py-2">{row.timeIn}</td>
+                        <td className={`border px-4 py-2 font-medium ${remarkColor}`}>
+                          {row.remark}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="space-y-8">
+              {Object.keys(groupedRows).map((subject) => (
+                <div key={subject} className="overflow-x-auto shadow rounded-lg bg-white">
+                  <h2 className="text-lg font-bold px-4 py-2 border-b bg-gray-50">
+                    {subject}
+                  </h2>
+                  <table className="min-w-full border border-gray-300 text-left text-sm">
+                    <thead className="bg-gray-100 font-semibold">
+                      <tr>
+                        <SortHeader label="Date" columnKey="date" />
+                        <SortHeader label="Student ID" columnKey="studentId" />
+                        <SortHeader label="Student Name" columnKey="studentName" />
+                        <SortHeader label="Year Level" columnKey="yearLevel" />
+                        <SortHeader label="Time In" columnKey="timeIn" />
+                        <SortHeader label="Remarks" columnKey="remark" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groupedRows[subject].map((row, index) => {
+                        const remarkColor = getRemarkTextColor(row.remark);
+                        return (
+                          <tr key={index} className="border-t hover:bg-gray-50">
+                            <td className="border px-4 py-2">{row.date}</td>
+                            <td className="border px-4 py-2">{row.studentId}</td>
+                            <td className="border px-4 py-2">{row.studentName}</td>
+                            <td className="border px-4 py-2">{row.yearLevel}</td>
+                            <td className="border px-4 py-2">{row.timeIn}</td>
+                            <td className={`border px-4 py-2 font-medium ${remarkColor}`}>
+                              {row.remark}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Pagination */}
-          <div className="flex items-center justify-between p-3 border-t bg-gray-50">
-            <button
-              disabled={page === 1}
-              onClick={() => setPage((p) => Math.max(p - 1, 1))}
-              className={`px-3 py-1 rounded ${
-                page === 1
-                  ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-                  : "bg-indigo-600 text-white"
-              }`}
-            >
-              Previous
-            </button>
+          {!groupedView && (
+            <div className="flex items-center justify-between p-3 border-t bg-gray-50">
+              <button
+                disabled={page === 1}
+                onClick={() => setPage((p) => Math.max(p - 1, 1))}
+                className={`px-3 py-1 rounded ${
+                  page === 1
+                    ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    : "bg-indigo-600 text-white"
+                }`}
+              >
+                Previous
+              </button>
 
-            <span className="text-sm text-gray-600">
-              Page {page} of {totalPages}
-            </span>
+              <span className="text-sm text-gray-600">
+                Page {page} of {totalPages}
+              </span>
 
-            <button
-              disabled={page === totalPages}
-              onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
-              className={`px-3 py-1 rounded ${
-                page === totalPages
-                  ? "bg-gray-200 text-gray-400 cursor-not-allowed"
-                  : "bg-indigo-600 text-white"
-              }`}
-            >
-              Next
-            </button>
-          </div>
+              <button
+                disabled={page === totalPages}
+                onClick={() => setPage((p) => Math.min(p + 1, totalPages))}
+                className={`px-3 py-1 rounded ${
+                  page === totalPages
+                    ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    : "bg-indigo-600 text-white"
+                }`}
+              >
+                Next
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

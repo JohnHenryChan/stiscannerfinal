@@ -1,48 +1,42 @@
 import React, { useState, useEffect } from "react";
-import { db } from "../firebaseConfig";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db, functions } from "../firebaseConfig";
+import { doc, getDoc, setDoc, updateDoc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import { functions } from "../firebaseConfig"; // Import initialized functions
 
 const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
   const isEdit = Boolean(initialData);
 
-  const [formData, setFormData] = useState(() =>
-    initialData ? {
-      id: initialData.id || "",
-      name: initialData.name || "",
-      email: initialData.email || "",
-    } : { id: "", name: "", email: "" }
-  );
+  // --- State ---
+  const [formData, setFormData] = useState({
+    id: initialData?.id || "",
+    name: initialData?.name || "",
+    email: initialData?.email || "",
+    role: initialData?.role || "instructor", // 👈 default role
+  });
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState(isEdit ? 2 : 1);
-  const [instructorID, setInstructorID] = useState(() => initialData?.id || "");
+  const [instructorID, setInstructorID] = useState(initialData?.id || "");
   const [error, setError] = useState("");
 
-
-
+  // --- Reset state when modal closes/opens ---
   useEffect(() => {
     if (!visible) {
-      setFormData({ id: "", name: "", email: "" });
-      setInstructorID("");
+      setFormData({
+        id: initialData?.id || "",
+        name: initialData?.name || "",
+        email: initialData?.email || "",
+        role: initialData?.role || "instructor",
+      });
+      setInstructorID(initialData?.id || "");
       setStep(isEdit ? 2 : 1);
       setError("");
-    } else if (initialData) {
-      setFormData({
-        id: initialData.id || "",
-        name: initialData.name || "",
-        email: initialData.email || "",
-      });
-      setInstructorID(initialData.id || "");
-      setStep(2);
-      setError("");
     }
-  }, [visible, initialData, isEdit]);
+  }, [visible, isEdit, initialData]);
 
   if (!visible) return null;
 
+  // --- Step 1: Check Instructor ID ---
   const handleIDCheck = async () => {
-    if (step !== 1) return; // ⛔ prevent firing again post-step 2
     if (!instructorID.trim()) {
       setError("Please enter an Instructor ID");
       return;
@@ -62,11 +56,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
         return;
       }
 
-      setFormData((prev) => ({
-        ...prev,
-        id: instructorID.trim(),
-      }));
-
+      setFormData((prev) => ({ ...prev, id: instructorID.trim() }));
       setStep(2);
     } catch (err) {
       console.error("🔍 Error checking ID:", err);
@@ -76,6 +66,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     }
   };
 
+  // --- Step 2: Form change handler ---
   const handleChange = (e) => {
     setFormData((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   };
@@ -85,11 +76,12 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     return id && name && email && email.includes("@");
   };
 
+  // --- Submit ---
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
 
-    const { email, id, name } = formData;
+    const { email, id, name, role } = formData;
 
     if (!email || !id || !name) {
       setError("All fields are required.");
@@ -97,24 +89,35 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     }
 
     try {
-      const createInstructorUser = httpsCallable(functions, "createInstructorUser");
-      const result = await createInstructorUser({ email, name });
-      const uid = result.data.uid;
+      if (isEdit) {
+        // 🔄 Update Firestore only
+        await updateDoc(doc(db, "instructors", id), {
+          name,
+          email,
+          role,
+        });
+      } else {
+        // 🆕 Create Auth user + Firestore
+        const createInstructorUser = httpsCallable(functions, "createInstructorUser");
+        const result = await createInstructorUser({ email, name });
+        const uid = result.data.uid;
 
-      const instructorData = {
-        id,
-        name,
-        email,
-        uid,
-        role: "user",
-        mustChangePassword: true,
-      };
+        const instructorData = {
+          id,
+          name,
+          email,
+          uid,
+          role,
+          mustChangePassword: true,
+        };
 
-      await setDoc(doc(db, "instructors", id), instructorData);
-      onAdd(instructorData);
+        await setDoc(doc(db, "instructors", id), instructorData);
+      }
+
+      onAdd(formData);
       onClose();
     } catch (err) {
-      console.error("🔥 Error creating instructor:", err);
+      console.error("🔥 Error saving instructor:", err);
       setError(err.message || "Unknown error occurred.");
     }
   };
@@ -123,9 +126,14 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div className="bg-white w-full max-w-md rounded-xl shadow-lg p-6 animate-fade-in">
         <h2 className="text-lg font-semibold mb-4">
-          {isEdit ? "Edit Instructor" : step === 1 ? "Enter Instructor ID" : "Instructor Details"}
+          {isEdit
+            ? "Edit Instructor"
+            : step === 1
+            ? "Enter Instructor ID"
+            : "Instructor Details"}
         </h2>
 
+        {/* --- Step 1: Enter Instructor ID --- */}
         {!isEdit && step === 1 ? (
           <div className="space-y-4">
             <input
@@ -153,6 +161,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
             </div>
           </div>
         ) : (
+          // --- Step 2: Instructor Form ---
           <form onSubmit={handleSubmit} className="space-y-4">
             <input
               name="id"
@@ -175,6 +184,20 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
               onChange={handleChange}
               className="w-full border px-3 py-2 rounded"
             />
+
+            {/* --- Role Dropdown --- */}
+            <select
+              name="role"
+              value={formData.role}
+              onChange={handleChange}
+              className="w-full border px-3 py-2 rounded"
+            >
+              <option value="instructor">Instructor</option>
+              <option value="admin">Admin</option>
+              <option value="guidance">Guidance Counselor</option>
+              <option value="registrar">Registrar</option>
+            </select>
+
             {error && <p className="text-red-600 text-sm">{error}</p>}
             <div className="flex justify-end gap-2">
               <button
@@ -187,10 +210,11 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
               <button
                 type="submit"
                 disabled={!isFormValid()}
-                className={`px-6 py-2 rounded text-white ${isFormValid()
-                  ? "bg-blue hover:bg-blue"
-                  : "bg-gray-300 cursor-not-allowed"
-                  }`}
+                className={`px-6 py-2 rounded text-white ${
+                  isFormValid()
+                    ? "bg-blue hover:bg-blue-700"
+                    : "bg-gray-300 cursor-not-allowed"
+                }`}
               >
                 {isEdit ? "Update" : "Add Instructor"}
               </button>
