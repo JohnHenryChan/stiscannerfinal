@@ -16,12 +16,16 @@ const SidebarAdmin = () => {
 
   const menus = [
     { name: "Dashboard", link: "/dashboard", icon: MdOutlineDashboard },
-    { name: "Attendance Record", link: "/attendancerecord", icon: MdOutlineRecordVoiceOver },
-    ...(role === "admin" ? [
-      { name: "Student Management", link: "/studentmanagement", icon: IoMdPerson }
+    ...(role === "admin"||"guidance counselor"||"instructor" ?[
+      { name: "Attendance Record", link: "/attendancerecord", icon: MdOutlineRecordVoiceOver },
     ] : []),
+    ...(role === "admin" ? [
+      { name: "Instructor Management", link: "/teachermanagement", icon: PiChalkboardTeacherLight },
+    ] : []),
+    ...(role ==="admin"||"registrar" ?[
+          { name: "Student Management", link: "/studentmanagement", icon: IoMdPerson },
+    ]: []),
     { name: "Subject Management", link: "/subjectmanagement", icon: MdLibraryBooks },
-    { name: "Instructor Management", link: "/teachermanagement", icon: PiChalkboardTeacherLight },
     { name: "Settings", link: "/settings", icon: CiSettings },
     { name: "Help/Support", link: "/helps", icon: IoIosHelpCircleOutline },
   ];

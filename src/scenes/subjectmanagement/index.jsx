@@ -35,7 +35,7 @@ const SubjectManagement = () => {
     const fetchSubjects = async () => {
       if (!user) return;
 
-      if (user.role === "admin") {
+      if (user.role === "admin"||"registrar") {
         unsubscribe = onSnapshot(collection(db, "subjectList"), (snapshot) => {
           const data = snapshot.docs.map((doc) => ({
             ...doc.data(),

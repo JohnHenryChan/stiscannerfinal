@@ -39,10 +39,7 @@ const InstructorManagement = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [instructorToDelete, setInstructorToDelete] = useState(null);
 
-  // 🚫 Block non-admins
-  if (!isAdmin) {
-    return <AccessDenied />;
-  }
+ 
 
   // Fetch instructors
   useEffect(() => {
@@ -90,9 +87,9 @@ const InstructorManagement = () => {
       }
     }
 
-    await setDoc(doc(db, "instructors", data.id), data, { merge: true });
-    setIsModalOpen(false);
+    //await setDoc(doc(db, "instructors", data.id), data, { merge: true });
     setEditingData(null);
+    setIsModalOpen(false);
   };
 
   const handleEdit = (index) => {
