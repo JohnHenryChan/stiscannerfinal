@@ -132,12 +132,23 @@ const AddStudent = ({
   // ---- Input change ----
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    // enforce numeric-only for specific fields and limit length
+    if (["rfid", "contact", "guardianContact"].includes(name)) {
+      const max = name === "rfid" ? 10 : 11;
+      const digits = value.replace(/\D/g, "").slice(0, max);
+      setFormData((prev) => ({ ...prev, [name]: digits }));
+    } else {
+      setFormData((prev) => ({ ...prev, [name]: value }));
+    }
   };
 
   // ---- Student ID check ----
   const handleIDCheck = async () => {
     if (!studentID.trim()) return setError("Student ID is required.");
+    // numeric-only, 11 digits
+    if (!/^\d{11}$/.test(studentID.trim())) {
+      return setError("Student ID must be exactly 11 digits (numbers only).");
+    }
     const isAdmin = role === "admin";
     const isIDInMasterList = validStudentIDs.includes(studentID.trim());
 
@@ -197,6 +208,19 @@ const AddStudent = ({
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    // validate numeric fields before sending
+    if (!/^\d{10}$/.test(formData.rfid || "")) {
+      setError("RFID must be exactly 10 digits (numbers only).");
+      return;
+    }
+    if (formData.contact && !/^\d{11}$/.test(formData.contact)) {
+      setError("Student contact must be exactly 11 digits (numbers only).");
+      return;
+    }
+    if (formData.guardianContact && !/^\d{11}$/.test(formData.guardianContact)) {
+      setError("Guardian contact must be exactly 11 digits (numbers only).");
+      return;
+    }
     try {
       const studentRef = doc(db, "students", formData.id);
       if (!initialData) {
@@ -342,12 +366,14 @@ const AddStudent = ({
           <div className="space-y-4">
             <input
               name="studentID"
-              placeholder="Student ID"
+              placeholder="Student ID (11 digits)"
               value={studentID}
-              onChange={(e) => setStudentID(e.target.value)}
+              inputMode="numeric"
+              pattern="\d*"
+              onChange={(e) => setStudentID(e.target.value.replace(/\D/g, "").slice(0, 11))}
               className="w-full border px-3 py-2 rounded"
             />
-            {error && <p className="text-red-600 text-sm">{error}</p>}
+            {error && <p className="text-red-600 text-xs">{error}</p>}
             <div className="flex justify-end gap-2">
               {!hideCancel && (
                 <button
@@ -377,19 +403,28 @@ const AddStudent = ({
               className="w-full border px-3 py-2 rounded bg-gray-100"
             />
             {["firstName", "lastName", "contact", "rfid", "guardian", "guardianContact"].map(
-              (field) => (
-                <input
-                  key={field}
-                  name={field}
-                  placeholder={field
-                    .replace(/([A-Z])/g, " $1")
-                    .replace(/^./, (s) => s.toUpperCase())}
-                  value={formData[field]}
-                  onChange={handleChange}
-                  className="w-full border px-3 py-2 rounded"
-                />
-              )
+              (field) => {
+                const label = field
+                  .replace(/([A-Z])/g, " $1")
+                  .replace(/^./, (s) => s.toUpperCase());
+                const isNumeric = ["contact", "rfid", "guardianContact"].includes(field);
+                const maxLen = field === "rfid" ? 10 : isNumeric ? 11 : undefined;
+                return (
+                  <input
+                    key={field}
+                    name={field}
+                    placeholder={isNumeric ? `${label} (numbers only)` : label}
+                    value={formData[field] || ""}
+                    onChange={handleChange}
+                    inputMode={isNumeric ? "numeric" : undefined}
+                    pattern={isNumeric ? "\\d*" : undefined}
+                    maxLength={maxLen}
+                    className="w-full border px-3 py-2 rounded"
+                  />
+                );
+              }
             )}
+            
             <select
               name="year"
               value={formData.year}

@@ -4,7 +4,6 @@ import { HiMenuAlt3 } from "react-icons/hi";
 import { Link } from "react-router-dom";
 import { MdOutlineDashboard, MdOutlineRecordVoiceOver } from "react-icons/md";
 import { PiChalkboardTeacherLight } from "react-icons/pi";
-import { CiSettings } from "react-icons/ci";
 import { IoIosHelpCircleOutline } from "react-icons/io";
 import { MdLibraryBooks } from "react-icons/md";
 import { IoMdPerson } from "react-icons/io";
@@ -16,23 +15,32 @@ const SidebarAdmin = () => {
 
   const menus = [
     { name: "Dashboard", link: "/dashboard", icon: MdOutlineDashboard },
-    ...(role === "admin"||"guidance counselor"||"instructor" ?[
-      { name: "Attendance Record", link: "/attendancerecord", icon: MdOutlineRecordVoiceOver },
-    ] : []),
-    ...(role === "admin" ? [
-      { name: "Instructor Management", link: "/teachermanagement", icon: PiChalkboardTeacherLight },
-    ] : []),
-    ...(role ==="admin"||"registrar" ?[
-          { name: "Student Management", link: "/studentmanagement", icon: IoMdPerson },
-    ]: []),
+
+    // Attendance Record visible only to admin, guidance counselor, instructor
+    ...(role === "admin" || role === "guidance counselor" || role === "instructor"
+      ? [{ name: "Attendance Record", link: "/attendancerecord", icon: MdOutlineRecordVoiceOver }]
+      : []),
+
+    // User Management (was Instructor Management) visible only to admin and registrar
+    ...(role === "admin" || role === "registrar"
+      ? [{ name: "User Management", link: "/teachermanagement", icon: PiChalkboardTeacherLight }]
+      : []),
+
+    // Student Management visible to admin and registrar
+    ...(role === "admin" || role === "registrar"
+      ? [{ name: "Student Management", link: "/studentmanagement", icon: IoMdPerson }]
+      : []),
+
     { name: "Subject Management", link: "/subjectmanagement", icon: MdLibraryBooks },
-    { name: "Settings", link: "/settings", icon: CiSettings },
+
+    // Help/Support remains
     { name: "Help/Support", link: "/helps", icon: IoIosHelpCircleOutline },
   ];
 
   return (
     <section className="flex gap-6">
-      <div className={`bg-amber min-h-screen sticky ${open ? "w-72" : "w-16"} duration-500 text-black px-4`}>
+      {/* make the sidebar stick to viewport top and occupy full height so it doesn't scroll with page */}
+      <div className={`bg-amber ${open ? "w-72" : "w-16"} duration-500 text-black px-4 sticky top-0 h-screen overflow-hidden`}>
         <div className="py-3 flex justify-end">
           <HiMenuAlt3 size={26} className="cursor-pointer" onClick={() => setOpen(!open)} />
         </div>

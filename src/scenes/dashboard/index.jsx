@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import { FaUsers, FaChalkboardTeacher } from "react-icons/fa";
@@ -12,73 +12,265 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
+import {
+  collection,
+  getDocs,
+  query,
+  orderBy,
+  limit,
+  doc as firestoreDoc,
+} from "firebase/firestore";
+import { db } from "../../firebaseConfig";
 
 const Dashboard = () => {
-  // ===== State Variables =====
-  const [selectedYear, setSelectedYear] = useState("2025");
+  const [selectedYear, setSelectedYear] = useState(
+    new Date().getFullYear().toString()
+  );
   const [selectedMonth, setSelectedMonth] = useState("All");
 
-  // ===== Example Students Table Data =====
-  const students = [
-    {
-      name: "Kim Dela Cruz",
-      status: "Present",
-      timeIn: "11:30 AM",
-      timeOut: "1:00 PM",
-    },
-    { name: "Juan Santos", status: "Absent", timeIn: "-", timeOut: "-" },
-    {
-      name: "Jessa Reyes",
-      status: "Present",
-      timeIn: "9:00 AM",
-      timeOut: "3:00 PM",
-    },
-  ];
+  const [totalStudents, setTotalStudents] = useState(null);
+  const [totalTeachers, setTotalTeachers] = useState(null);
 
-  // ===== Example Attendance Data by Year =====
-  const attendanceDataByYear = {
-    2025: [
-      { month: "Jan", Late: 15, Absent: 22, NoLogs: 8 },
-      { month: "Feb", Late: 12, Absent: 18, NoLogs: 10 },
-      { month: "Mar", Late: 20, Absent: 25, NoLogs: 12 },
-      { month: "Apr", Late: 14, Absent: 19, NoLogs: 9 },
-      { month: "May", Late: 10, Absent: 15, NoLogs: 6 },
-      { month: "June", Late: 10, Absent: 15, NoLogs: 6 },
-    ],
-    2024: [
-      { month: "Jan", Late: 18, Absent: 20, NoLogs: 5 },
-      { month: "Feb", Late: 14, Absent: 22, NoLogs: 9 },
-      { month: "Mar", Late: 19, Absent: 28, NoLogs: 11 },
-      { month: "Apr", Late: 10, Absent: 16, NoLogs: 8 },
-      { month: "May", Late: 8, Absent: 12, NoLogs: 4 },
-    ],
-    2023: [
-      { month: "Jan", Late: 10, Absent: 12, NoLogs: 3 },
-      { month: "Feb", Late: 9, Absent: 10, NoLogs: 2 },
-      { month: "Mar", Late: 13, Absent: 15, NoLogs: 6 },
-      { month: "Apr", Late: 7, Absent: 11, NoLogs: 4 },
-      { month: "May", Late: 5, Absent: 8, NoLogs: 3 },
-    ],
+  // today's subjects (active right now) with counts
+  const [todaySubjects, setTodaySubjects] = useState([]);
+  // flattened latest attendance entries across today's subjects (sorted desc by timestamp)
+  const [latestTodayEntries, setLatestTodayEntries] = useState([]);
+  // aggregated monthly chart data (Late, Absent, Present)
+  const [chartData, setChartData] = useState([]);
+
+  // use consistent 3-letter month abbreviations (matches chart keys)
+  const months = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const years = useMemo(() => {
+    const cur = new Date().getFullYear();
+    return [cur.toString(), (cur - 1).toString(), (cur - 2).toString()];
+  }, []);
+
+  const getTodayDateString = () => {
+    const t = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
   };
 
-  const years = ["2025", "2024", "2023"];
-  const months = ["All", "Jan", "Feb", "Mar", "Apr", "May", "June"];
+  const getCurrentDayShort = () =>
+    new Date().toLocaleDateString("en-US", { weekday: "short" }); // "Mon","Tue",...
 
-  // ===== FUNCTION: Get filtered data based on selected year & month =====
-  const getFilteredAttendanceData = () => {
-    let data = attendanceDataByYear[selectedYear] || [];
-    if (selectedMonth !== "All") {
-      // Keep all months but highlight the selected month in the chart or tooltip
-      data = data.map((d) => ({
-        ...d,
-        highlighted: d.month === selectedMonth,
-      }));
-    }
-    return data;
-  };
+  const getCurrentTimeHHMM = () => new Date().toTimeString().slice(0, 5); // "HH:MM"
 
-  // ====== Derived Data ======
-  const filteredData = getFilteredAttendanceData();
+  // === totals ===
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const sSnap = await getDocs(collection(db, "students"));
+        const iSnap = await getDocs(collection(db, "instructors"));
+        if (!mounted) return;
+        setTotalStudents(sSnap.size);
+        setTotalTeachers(iSnap.size);
+      } catch (err) {
+        console.error("Failed to fetch totals:", err);
+        if (mounted) {
+          setTotalStudents(0);
+          setTotalTeachers(0);
+        }
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // === Today's subjects + counts + latest entries ===
+  useEffect(() => {
+    let cancelled = false;
+    const dateStr = getTodayDateString();
+    const dayShort = getCurrentDayShort();
+    const nowHHMM = getCurrentTimeHHMM();
+
+    const normalizeStatus = (raw) => {
+      const r = raw == null ? "" : String(raw).trim().toLowerCase();
+      // if there's no remark/status treat as Absent
+      if (!r) return "Absent";
+      if (r.includes("absent")) return "Absent";
+      if (r.includes("late")) return "Late";
+      if (r.includes("present")) return "Present";
+      // ambiguous/unknown -> Absent
+      return "Absent";
+    };
+
+    const fetchToday = async () => {
+      try {
+        // load subjects to determine which are active now
+        const subsSnap = await getDocs(collection(db, "subjectList"));
+        const activeSubjects = [];
+        subsSnap.forEach((s) => {
+          const data = s.data() || {};
+          const days = Array.isArray(data.days) ? data.days : [];
+          const matchesDay =
+            days.includes(dayShort) ||
+            days.includes(
+              new Date().toLocaleDateString("en-US", { weekday: "long" })
+            );
+          const withinTime =
+            !data.startTime ||
+            !data.endTime ||
+            (data.startTime <= nowHHMM && nowHHMM <= data.endTime);
+          if (data.active !== false && matchesDay && withinTime) {
+            activeSubjects.push({ id: s.id, ...data });
+          }
+        });
+
+        const subjectsWithCounts = [];
+        let allEntries = [];
+
+        for (const subj of activeSubjects) {
+          // attendance path: attendance/{dateStr}/{subjectId} -> docs keyed by studentID
+          const subjColRef = collection(db, "attendance", dateStr, subj.id);
+          // fetch all docs to compute counts (could be optimized)
+          const attSnap = await getDocs(subjColRef);
+          const counts = { Present: 0, Absent: 0, Late: 0, Total: 0 };
+          const subjEntries = [];
+
+          if (!attSnap.empty) {
+            attSnap.forEach((d) => {
+              const data = d.data() || {};
+              const status = normalizeStatus(
+                data.status || data.remark || data.remarks || data.remark?.toString()
+              );
+              counts[status] = (counts[status] || 0) + 1;
+              const ts = data.timestamp
+                ? data.timestamp.toDate
+                  ? data.timestamp.toDate().getTime()
+                  : new Date(data.timestamp).getTime()
+                : null;
+              subjEntries.push({
+                id: d.id,
+                subjectCode: subj.id,
+                subjectName: subj.name || subj.subject || subj.subjectName || subj.id,
+                studentId: d.id,
+                studentName: data.name || data.studentName || "",
+                status,
+                timeIn: data.time || data.timeIn || null,
+                timestamp: ts,
+                raw: data,
+              });
+            });
+          }
+
+          counts.Total = counts.Present + counts.Absent + counts.Late;
+          subjectsWithCounts.push({
+            subjectCode: subj.id,
+            subjectName: subj.name || subj.subject || subj.subjectName || subj.id,
+            startTime: subj.startTime || subj.start || "TBD",
+            endTime: subj.endTime || subj.end || "TBD",
+            counts,
+            entries: subjEntries,
+          });
+
+          allEntries = allEntries.concat(subjEntries);
+        }
+
+        // sort allEntries by timestamp desc (fallback to timeIn if timestamp missing)
+        allEntries.sort((a, b) => {
+          const ta = a.timestamp || (a.timeIn ? new Date().setHours(
+            Number(a.timeIn.split(":")[0] || 0),
+            Number(a.timeIn.split(":")[1] || 0)
+          ) : 0);
+          const tb = b.timestamp || (b.timeIn ? new Date().setHours(
+            Number(b.timeIn.split(":")[0] || 0),
+            Number(b.timeIn.split(":")[1] || 0)
+          ) : 0);
+          return tb - ta;
+        });
+
+        if (!cancelled) {
+          setTodaySubjects(subjectsWithCounts);
+          setLatestTodayEntries(allEntries.slice(0, 5));
+        }
+      } catch (err) {
+        console.error("Failed to load today's activity:", err);
+        if (!cancelled) {
+          setTodaySubjects([]);
+          setLatestTodayEntries([]);
+        }
+      }
+    };
+
+    fetchToday();
+    return () => {
+      cancelled = true;
+    };
+  }, []); // run on mount
+
+  // === Chart aggregation (simple): scan attendance date docs that belong to selectedYear and aggregate by month ===
+  useEffect(() => {
+    // build monthly aggregates for the selected year (returns array of 12 months)
+    let cancelled = false;
+    (async () => {
+      try {
+        const monthShorts = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        const map = {};
+        monthShorts.forEach((m) => (map[m] = { month: m, Late: 0, Absent: 0, Present: 0 }));
+
+        // top-level attendance date docs (ids expected "YYYY-MM-DD")
+        const datesSnap = await getDocs(collection(db, "attendance"));
+        const dateDocs = datesSnap.docs.map((d) => d.id).filter((id) => id.startsWith(selectedYear));
+
+        // load subject ids once
+        const subsSnap = await getDocs(collection(db, "subjectList"));
+        const subjectIds = subsSnap.docs.map((d) => d.id);
+
+        for (const dateId of dateDocs) {
+          if (cancelled) break;
+          const parts = dateId.split("-");
+          const mm = parts.length >= 2 ? Number(parts[1]) : NaN;
+          if (isNaN(mm) || mm < 1 || mm > 12) continue;
+          const monthKey = monthShorts[mm - 1];
+
+          // for each subject subcollection under this date, count entries
+          for (const subjId of subjectIds) {
+            if (cancelled) break;
+            try {
+              const subjCol = collection(db, "attendance", dateId, subjId);
+              const attSnap = await getDocs(subjCol);
+              if (attSnap.empty) continue;
+              attSnap.forEach((d) => {
+                const data = d.data() || {};
+                const raw = (data.status ?? data.remark ?? data.remarks ?? "").toString().trim().toLowerCase();
+                if (!raw) map[monthKey].Absent += 1;
+                else if (raw.includes("absent")) map[monthKey].Absent += 1;
+                else if (raw.includes("late")) map[monthKey].Late += 1;
+                else if (raw.includes("present")) map[monthKey].Present += 1;
+                else map[monthKey].Absent += 1; // ambiguous -> treat as Absent
+              });
+            } catch (err) {
+              // ignore per-subject errors
+            }
+          }
+        }
+
+        const arr = Object.values(map);
+        if (!cancelled) setChartData(arr);
+      } catch (err) {
+        console.error("Failed to build chart data:", err);
+        if (!cancelled) setChartData([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedYear]);
+
+  // helpers for rendering
+  const totalsToday = useMemo(() => {
+    const t = { Present: 0, Absent: 0, Late: 0, Total: 0 };
+    todaySubjects.forEach((s) => {
+      t.Present += s.counts.Present || 0;
+      t.Absent += s.counts.Absent || 0;
+      t.Late += s.counts.Late || 0;
+    });
+    t.Total = t.Present + t.Absent + t.Late;
+    return t;
+  }, [todaySubjects]);
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-50">
@@ -89,56 +281,56 @@ const Dashboard = () => {
         <main className="flex-1 p-6">
           <h1 className="text-2xl font-bold mb-6 text-gray-800">Dashboard</h1>
 
-          {/* === TOP CARDS === */}
+          {/* TOP CARDS */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-6">
-            {/* Total Students */}
             <div className="bg-white shadow-md rounded-2xl p-5 flex flex-col items-center justify-center h-36 hover:shadow-lg transition-all duration-200">
               <div className="bg-blue-100 rounded-full w-12 h-12 flex items-center justify-center mb-3">
                 <FaUsers className="text-blue-600 text-2xl" />
               </div>
-              <p className="text-lg font-semibold text-gray-800">
-                Total Students
-              </p>
-              <h2 className="text-3xl font-bold text-gray-800">2,468</h2>
+              <p className="text-lg font-semibold text-gray-800">Total Students</p>
+              <h2 className="text-3xl font-bold text-gray-800">{totalStudents ?? "…"}</h2>
             </div>
 
-            {/* Total Teachers */}
             <div className="bg-white shadow-md rounded-2xl p-5 flex flex-col items-center justify-center h-36 hover:shadow-lg transition-all duration-200">
               <div className="bg-green-100 rounded-full w-12 h-12 flex items-center justify-center mb-3">
                 <FaChalkboardTeacher className="text-green-600 text-2xl" />
               </div>
-              <p className="text-lg font-semibold text-gray-800">
-                Total Teachers
-              </p>
-              <h2 className="text-3xl font-bold text-gray-800">58</h2>
+              <p className="text-lg font-semibold text-gray-800">Total Teachers</p>
+              <h2 className="text-3xl font-bold text-gray-800">{totalTeachers ?? "…"}</h2>
             </div>
 
-            {/* Boys & Girls */}
-            <div className="bg-white shadow-md rounded-2xl p-5 flex flex-col justify-center h-36 hover:shadow-lg transition-all duration-200">
-              <h3 className="text-center font-semibold mb-3 text-gray-800">
-                Student Breakdown
-              </h3>
-              <div className="flex justify-around">
-                <div className="text-center">
-                  <p className="text-blue-600 text-xl font-bold">1,200</p>
-                  <p className="text-gray-500 text-sm">Boys</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-pink-500 text-xl font-bold">1,268</p>
-                  <p className="text-gray-500 text-sm">Girls</p>
-                </div>
+            {/* Today's Activity expanded (replaces student breakdown) */}
+            <div className="bg-white shadow-md rounded-2xl p-5 flex flex-col hover:shadow-lg transition-all duration-200">
+              <h3 className="text-center font-semibold mb-3 text-gray-800">Today's Activity</h3>
+              <div className="text-sm text-gray-700">
+                {todaySubjects.length === 0 ? (
+                  <div className="text-center text-gray-600">No subjects taking attendance right now.</div>
+                ) : (
+                  <ul className="space-y-3">
+                    {todaySubjects.map((s) => (
+                      <li key={s.subjectCode} className="flex justify-between items-center border-b py-2">
+                        <div>
+                          <div className="font-medium text-gray-800">{s.subjectName}</div>
+                          <div className="text-xs text-gray-500">{s.startTime} - {s.endTime}</div>
+                        </div>
+                        <div className="text-right text-sm">
+                          <div>Present: <span className="font-semibold text-blue-600">{s.counts.Present}</span></div>
+                          <div>Absent: <span className="font-semibold text-red-600">{s.counts.Absent}</span></div>
+                          <div>Late: <span className="font-semibold text-yellow-500">{s.counts.Late}</span></div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
           </div>
 
-          {/* === GRAPH & TODAY'S ACTIVITY === */}
+          {/* GRAPH & latest entries */}
           <div className="grid grid-cols-1 lg:grid-cols-[2.1fr_1fr] gap-6 mb-6">
-            {/* Attendance Issues Graph */}
             <div className="bg-white shadow-md rounded-2xl p-6 hover:shadow-lg transition-all duration-200">
               <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold text-gray-800">
-                  Attendance Issues Overview
-                </h3>
+                <h3 className="text-lg font-semibold text-gray-800">Attendance Issues Overview</h3>
                 <div className="flex gap-2">
                   <select
                     className="border rounded-lg px-3 py-1 text-sm text-gray-700"
@@ -157,130 +349,85 @@ const Dashboard = () => {
                     value={selectedMonth}
                     onChange={(e) => setSelectedMonth(e.target.value)}
                   >
-                    {months.map((month) => (
-                      <option key={month} value={month}>
-                        {month}
+                    {months.map((m) => (
+                      // replace "No Logs" concept by "Present" label in UI where applicable
+                      <option key={m} value={m}>
+                        {m}
                       </option>
                     ))}
                   </select>
                 </div>
               </div>
 
-              {/* Dynamic Chart */}
               <ResponsiveContainer width="100%" height={280}>
-                <LineChart data={filteredData}>
+                <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis dataKey="month" stroke="#64748b" />
                   <YAxis stroke="#64748b" />
                   <Tooltip />
                   <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="Late"
-                    stroke="#facc15"
-                    strokeWidth={3}
-                    dot={{ r: 5 }}
-                    activeDot={{ r: 8 }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="Absent"
-                    stroke="#ef4444"
-                    strokeWidth={3}
-                    dot={{ r: 5 }}
-                    activeDot={{ r: 8 }}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="NoLogs"
-                    stroke="#3b82f6"
-                    strokeWidth={3}
-                    dot={{ r: 5 }}
-                    activeDot={{ r: 8 }}
-                  />
+                  <Line type="monotone" dataKey="Late" stroke="#facc15" strokeWidth={3} dot={{ r: 5 }} activeDot={{ r: 8 }} />
+                  <Line type="monotone" dataKey="Absent" stroke="#ef4444" strokeWidth={3} dot={{ r: 5 }} activeDot={{ r: 8 }} />
+                  <Line type="monotone" dataKey="Present" stroke="#3b82f6" strokeWidth={3} dot={{ r: 5 }} activeDot={{ r: 8 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
 
-            {/* Today's Activity */}
+            {/* latest today's attendance entries (5 latest) */}
             <div className="bg-white shadow-md rounded-2xl p-6 flex flex-col hover:shadow-lg transition-all duration-200">
-              <h3 className="text-lg font-semibold mb-4 text-gray-800">
-                Today's Activity
-              </h3>
-              <ul className="space-y-3 text-gray-700 text-sm flex-grow">
-                <li className="border-l-4 border-green-500 pl-3">
-                  Kim Dela Cruz - Checked in at 11:30 AM
-                </li>
-                <li className="border-l-4 border-red-500 pl-3">
-                  Juan Santos - Absent today
-                </li>
-                <li className="border-l-4 border-indigo-500 pl-3">
-                  Jessa Reyes - Checked out at 3:00 PM
-                </li>
-              </ul>
+              <h3 className="text-lg font-semibold mb-4 text-gray-800">Latest Attendance (Today)</h3>
+
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm text-left border-t">
+                  <thead className="bg-gray-100 text-gray-600 uppercase">
+                    <tr>
+                      <th className="py-2 px-4">Student</th>
+                      <th className="py-2 px-4">Subject</th>
+                      <th className="py-2 px-4">Status</th>
+                      <th className="py-2 px-4">Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {latestTodayEntries.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-4 text-center text-sm text-gray-500">No attendance records for today.</td>
+                      </tr>
+                    )}
+                    {latestTodayEntries.map((e, idx) => (
+                      <tr key={e.id || idx} className="border-b hover:bg-gray-50">
+                        <td className="py-2 px-4">{e.studentName || e.studentId || "—"}</td>
+                        <td className="py-2 px-4">{e.subjectName || e.subjectCode}</td>
+                        <td className={`py-2 px-4 font-medium ${e.status === "Present" ? "text-green-600" : e.status === "Absent" ? "text-red-600" : "text-yellow-600"}`}>{e.status}</td>
+                        <td className="py-2 px-4">{e.timeIn || (e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "-")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
 
-          {/* === ATTENDANCE OVERVIEW === */}
+          {/* Attendance Overview (today totals only) */}
           <div className="bg-white shadow-md rounded-2xl p-6 hover:shadow-lg transition-all duration-200">
-            <h3 className="text-lg font-semibold mb-6 text-gray-800">
-              Attendance Overview
-            </h3>
+            <h3 className="text-lg font-semibold mb-6 text-gray-800">Attendance Overview (Today)</h3>
 
-            {/* Totals Section */}
-            <div className="grid grid-cols-2 md:grid-cols-5 text-center mb-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 text-center mb-6">
               <div>
-                <p className="text-2xl font-bold text-green-600">205</p>
+                <p className="text-2xl font-bold text-blue-600">{totalsToday.Present}</p>
                 <p className="text-gray-500 font-medium">Present</p>
               </div>
               <div>
-                <p className="text-2xl font-bold text-red-600">170</p>
+                <p className="text-2xl font-bold text-red-600">{totalsToday.Absent}</p>
                 <p className="text-gray-500 font-medium">Absent</p>
               </div>
               <div>
-                <p className="text-2xl font-bold text-yellow-500">28</p>
+                <p className="text-2xl font-bold text-yellow-500">{totalsToday.Late}</p>
                 <p className="text-gray-500 font-medium">Late</p>
               </div>
               <div>
-                <p className="text-2xl font-bold text-gray-700">403</p>
+                <p className="text-2xl font-bold text-gray-700">{totalsToday.Total}</p>
                 <p className="text-gray-500 font-medium">Total</p>
               </div>
-              <div>
-                <p className="text-2xl font-bold text-blue-600">12</p>
-                <p className="text-gray-500 font-medium">No Logs</p>
-              </div>
-            </div>
-
-            {/* Table */}
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-sm text-left border-t">
-                <thead className="bg-gray-100 text-gray-600 uppercase">
-                  <tr>
-                    <th className="py-2 px-4">Student Name</th>
-                    <th className="py-2 px-4">Status</th>
-                    <th className="py-2 px-4">Time In</th>
-                    <th className="py-2 px-4">Time Out</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {students.map((s, idx) => (
-                    <tr key={idx} className="border-b hover:bg-gray-50">
-                      <td className="py-2 px-4">{s.name}</td>
-                      <td
-                        className={`py-2 px-4 font-medium ${
-                          s.status === "Present"
-                            ? "text-green-600"
-                            : "text-red-600"
-                        }`}
-                      >
-                        {s.status}
-                      </td>
-                      <td className="py-2 px-4">{s.timeIn}</td>
-                      <td className="py-2 px-4">{s.timeOut}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           </div>
         </main>

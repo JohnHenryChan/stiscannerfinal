@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import { MdSearch } from "react-icons/md";
@@ -27,14 +27,30 @@ const AttendanceRecord = () => {
   // Sorting state
   const [sortConfig, setSortConfig] = useState({ key: null, direction: null });
 
+  // subject dropdown state + ref for outside-click close
+  const [openSubjectDropdown, setOpenSubjectDropdown] = useState(false);
+  const subjDropdownRef = useRef(null);
+
+  // remark & year dropdown state + refs (prevent ReferenceError)
+  const [openRemarkDropdown, setOpenRemarkDropdown] = useState(false);
+  const remarkDropdownRef = useRef(null);
+  const [openYearDropdown, setOpenYearDropdown] = useState(false);
+  const yearDropdownRef = useRef(null);
+
   // Fetch subjects
   useEffect(() => {
     const fetchSubjects = async () => {
+      // read every document (subjectCode) under root/subjectList and use its 'subject' field
       const snap = await getDocs(collection(db, "subjectList"));
-      const subjects = snap.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
+      const subjects = snap.docs.map((d) => {
+        const data = d.data() || {};
+        // ensure we always have a subject string (fallback to doc id)
+        return {
+          id: d.id,
+          subject: String(data.subject || "").trim() || d.id,
+          ...data,
+        };
+      });
       setSubjectList(subjects);
       setYearLevels(["1st Year", "2nd Year", "3rd Year", "4th Year"]);
     };
@@ -181,24 +197,6 @@ const AttendanceRecord = () => {
     return acc;
   }, {});
 
-  // Export CSV
-  const exportCSV = () => {
-    const headers = [
-      "Date,Student ID,Student Name,Subject,Year Level,Time In,Remarks",
-    ];
-    const rows = sortedRows.map(
-      (r) =>
-        `${r.date},${r.studentId},${r.studentName},${r.subject},${r.yearLevel},${r.timeIn},${r.remark}`
-    );
-    const csv = headers.concat(rows).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "attendance.csv";
-    a.click();
-  };
-
   // Export PDF
   const exportPDF = () => {
     const doc = new jsPDF();
@@ -248,7 +246,12 @@ const AttendanceRecord = () => {
     a.click();
   };
 
-  const subjectOptions = subjectList.map((s) => s.subject).filter(Boolean);
+  // options for the dropdown: ensure unique subject names from every subjectCode document
+  const subjectOptions = Array.from(
+    new Set(subjectList.map((s) => (s && s.subject ? s.subject : s.id)))
+  )
+    .filter(Boolean)
+    .sort();
 
   const SortHeader = ({ label, columnKey }) => {
     let arrow = "";
@@ -264,6 +267,23 @@ const AttendanceRecord = () => {
       </th>
     );
   };
+
+  // close dropdowns on outside click
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (subjDropdownRef?.current && !subjDropdownRef.current.contains(e.target)) {
+        setOpenSubjectDropdown(false);
+      }
+      if (remarkDropdownRef?.current && !remarkDropdownRef.current.contains(e.target)) {
+        setOpenRemarkDropdown(false);
+      }
+      if (yearDropdownRef?.current && !yearDropdownRef.current.contains(e.target)) {
+        setOpenYearDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-100">
@@ -296,55 +316,92 @@ const AttendanceRecord = () => {
               />
             </div>
 
-            {/* Subject filter */}
-            <div className="flex gap-2 flex-wrap">
-              {subjectOptions.map((subj, i) => (
-                <button
-                  key={i}
-                  onClick={() => toggleSelect(selectedSubjects, setSelectedSubjects, subj)}
-                  className={`px-3 py-1 rounded border ${
-                    selectedSubjects.includes(subj)
-                      ? "bg-indigo-600 text-white"
-                      : "bg-gray-100 text-gray-700"
-                  }`}
-                >
-                  {subj}
-                </button>
-              ))}
+            {/* Subject checklist dropdown */}
+            <div className="relative" ref={subjDropdownRef}>
+              <button
+                onClick={() => setOpenSubjectDropdown((s) => !s)}
+                className="px-3 py-1 rounded border bg-white flex items-center gap-2"
+              >
+                Subjects
+                {selectedSubjects.length > 0 ? (
+                  <span className="text-xs text-gray-600">({selectedSubjects.length})</span>
+                ) : null}
+                <span className="ml-2 text-gray-500">{openSubjectDropdown ? "▾" : "▸"}</span>
+              </button>
+              {openSubjectDropdown && (
+                <div className="absolute left-0 mt-2 w-60 max-h-48 overflow-auto bg-white border rounded shadow z-40 p-2">
+                  {subjectOptions.length === 0 ? (
+                    <div className="text-sm text-gray-500 p-2">No subjects</div>
+                  ) : (
+                    subjectOptions.map((subj, i) => (
+                      <label key={i} className="flex items-center gap-2 p-1 hover:bg-gray-50 rounded">
+                        <input
+                          type="checkbox"
+                          checked={selectedSubjects.includes(subj)}
+                          onChange={() => toggleSelect(selectedSubjects, setSelectedSubjects, subj)}
+                        />
+                        <span className="text-sm">{subj}</span>
+                      </label>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Remark filter */}
-            <div className="flex gap-2 flex-wrap">
-              {["Present", "Late", "Absent"].map((remark) => (
-                <button
-                  key={remark}
-                  onClick={() => toggleSelect(selectedRemarks, setSelectedRemarks, remark)}
-                  className={`px-3 py-1 rounded border ${
-                    selectedRemarks.includes(remark)
-                      ? "bg-indigo-600 text-white"
-                      : "bg-gray-100 text-gray-700"
-                  }`}
-                >
-                  {remark}
-                </button>
-              ))}
+            {/* Remark checklist dropdown */}
+            <div className="relative" ref={remarkDropdownRef}>
+              <button
+                onClick={() => setOpenRemarkDropdown((s) => !s)}
+                className="px-3 py-1 rounded border bg-white flex items-center gap-2"
+              >
+                Remarks
+                {selectedRemarks.length > 0 ? (
+                  <span className="text-xs text-gray-600">({selectedRemarks.length})</span>
+                ) : null}
+                <span className="ml-2 text-gray-500">{openRemarkDropdown ? "▾" : "▸"}</span>
+              </button>
+              {openRemarkDropdown && (
+                <div className="absolute left-0 mt-2 w-48 max-h-40 overflow-auto bg-white border rounded shadow z-40 p-2">
+                  {["Late", "Absent", "Present"].map((remark) => (
+                    <label key={remark} className="flex items-center gap-2 p-1 hover:bg-gray-50 rounded">
+                      <input
+                        type="checkbox"
+                        checked={selectedRemarks.includes(remark)}
+                        onChange={() => toggleSelect(selectedRemarks, setSelectedRemarks, remark)}
+                      />
+                      <span className="text-sm">{remark}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {/* Year level filter */}
-            <div className="flex gap-2 flex-wrap">
-              {yearLevels.map((year) => (
-                <button
-                  key={year}
-                  onClick={() => toggleSelect(selectedYears, setSelectedYears, year)}
-                  className={`px-3 py-1 rounded border ${
-                    selectedYears.includes(year)
-                      ? "bg-indigo-600 text-white"
-                      : "bg-gray-100 text-gray-700"
-                  }`}
-                >
-                  {year}
-                </button>
-              ))}
+            {/* Year level checklist dropdown */}
+            <div className="relative" ref={yearDropdownRef}>
+              <button
+                onClick={() => setOpenYearDropdown((s) => !s)}
+                className="px-3 py-1 rounded border bg-white flex items-center gap-2"
+              >
+                Year Level
+                {selectedYears.length > 0 ? (
+                  <span className="text-xs text-gray-600">({selectedYears.length})</span>
+                ) : null}
+                <span className="ml-2 text-gray-500">{openYearDropdown ? "▾" : "▸"}</span>
+              </button>
+              {openYearDropdown && (
+                <div className="absolute left-0 mt-2 w-40 max-h-40 overflow-auto bg-white border rounded shadow z-40 p-2">
+                  {yearLevels.map((year) => (
+                    <label key={year} className="flex items-center gap-2 p-1 hover:bg-gray-50 rounded">
+                      <input
+                        type="checkbox"
+                        checked={selectedYears.includes(year)}
+                        onChange={() => toggleSelect(selectedYears, setSelectedYears, year)}
+                      />
+                      <span className="text-sm">{year}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
 
             <button
@@ -377,12 +434,6 @@ const AttendanceRecord = () => {
 
           {/* Export buttons */}
           <div className="flex gap-2 mb-4">
-            <button
-              onClick={exportCSV}
-              className="px-3 py-1 bg-green-600 text-white rounded"
-            >
-              Export CSV
-            </button>
             <button
               onClick={exportPDF}
               className="px-3 py-1 bg-red-600 text-white rounded"

@@ -17,25 +17,33 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
     semester: "",
   });
 
-  const docSub = collection(db, "subjectList");
   const [errorMessage, setErrorMessage] = useState("");
+  const docSub = collection(db, "subjectList");
 
+  // Reset form when modal opens or initialData changes
   useEffect(() => {
     if (visible) {
-      setFormData(
-        initialData || {
-          program: "",
-          subject: "",
-          subjectCode: "",
-          yearLevel: "",
-          startTime: "",
-          endTime: "",
-          days: [],
-          schoolYearStart: "",
-          schoolYearEnd: "",
-          semester: "",
-        }
-      );
+      let safeData = initialData ? { ...initialData } : {};
+
+      // Normalize fields
+      safeData.days = Array.isArray(safeData.days)
+        ? safeData.days
+        : safeData.days
+        ? [safeData.days]
+        : [];
+
+      setFormData({
+        program: safeData.program || "",
+        subject: safeData.subject || "",
+        subjectCode: safeData.subjectCode || "",
+        yearLevel: safeData.yearLevel || "",
+        startTime: safeData.startTime || "",
+        endTime: safeData.endTime || "",
+        days: safeData.days,
+        schoolYearStart: safeData.schoolYearStart || "",
+        schoolYearEnd: safeData.schoolYearEnd || "",
+        semester: safeData.semester || "",
+      });
       setErrorMessage("");
     }
   }, [visible, initialData]);
@@ -62,9 +70,9 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
 
   const handleDayToggle = (day) => {
     setFormData((prev) => {
-      const updatedDays = prev.days.includes(day)
+      const updatedDays = prev.days?.includes(day)
         ? prev.days.filter((d) => d !== day)
-        : [...prev.days, day];
+        : [...(prev.days || []), day];
       return { ...prev, days: updatedDays };
     });
   };
@@ -84,22 +92,13 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
       semester,
     } = formData;
 
-    if (
-      !program ||
-      !subject ||
-      !subjectCode ||
-      !yearLevel ||
-      !startTime ||
-      !endTime ||
-      days.length === 0 ||
-      !schoolYearStart ||
-      !schoolYearEnd ||
-      !semester
-    ) {
-      setErrorMessage("Please fill in all fields and select at least one day.");
+    // Basic validation: allow optional fields (days/time/year) but require main info
+    if (!program || !subject || !subjectCode || !yearLevel || !semester) {
+      setErrorMessage("Please fill in all required fields (Program, Subject, Code, Year, Semester).");
       return;
     }
 
+    // If adding a new subject, check for existing doc
     if (!initialData) {
       const docRef = doc(docSub, subjectCode);
       const docCheck = await getDoc(docRef);
@@ -148,6 +147,7 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
             onChange={handleChange}
             className="w-full border rounded-md p-2"
           />
+
           <select
             name="yearLevel"
             value={formData.yearLevel}
@@ -191,23 +191,25 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
             <option value="2nd Semester">2nd Semester</option>
           </select>
 
-          <input
-            type="time"
-            name="startTime"
-            value={formData.startTime}
-            onChange={handleChange}
-            className="w-full border rounded-md p-2"
-          />
-          <input
-            type="time"
-            name="endTime"
-            value={formData.endTime}
-            onChange={handleChange}
-            className="w-full border rounded-md p-2"
-          />
+          <div className="flex gap-2">
+            <input
+              type="time"
+              name="startTime"
+              value={formData.startTime}
+              onChange={handleChange}
+              className="w-full border rounded-md p-2"
+            />
+            <input
+              type="time"
+              name="endTime"
+              value={formData.endTime}
+              onChange={handleChange}
+              className="w-full border rounded-md p-2"
+            />
+          </div>
 
           <div>
-            <p className="font-medium mt-3">Tap to Toggle Days:</p>
+            <p className="font-medium mt-3">Tap to Toggle Days :</p>
             <div className="flex flex-wrap gap-2 mt-2">
               {daysOfWeek.map((day) => (
                 <button
@@ -215,7 +217,7 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
                   key={day}
                   onClick={() => handleDayToggle(day)}
                   className={`px-3 py-1 rounded-md border transition-colors duration-150 ${
-                    formData.days.includes(day)
+                    formData.days?.includes(day)
                       ? "bg-blue-700 text-white border-blue-800 hover:bg-blue-800"
                       : "bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200"
                   }`}
