@@ -21,8 +21,10 @@ import {
   doc as firestoreDoc,
 } from "firebase/firestore";
 import { db } from "../../firebaseConfig";
+import { useAuth } from "../../context/AuthContext";
 
 const Dashboard = () => {
+  const { user } = useAuth();
   const [selectedYear, setSelectedYear] = useState(
     new Date().getFullYear().toString()
   );
@@ -87,19 +89,33 @@ const Dashboard = () => {
     const nowHHMM = getCurrentTimeHHMM();
 
     const normalizeStatus = (raw) => {
-      const r = raw == null ? "" : String(raw).trim().toLowerCase();
-      // if there's no remark/status treat as Absent
+      if (raw == null) return "Absent";
+      const r = String(raw).trim().toLowerCase();
       if (!r) return "Absent";
       if (r.includes("absent")) return "Absent";
       if (r.includes("late")) return "Late";
       if (r.includes("present")) return "Present";
-      // ambiguous/unknown -> Absent
       return "Absent";
     };
 
     const fetchToday = async () => {
       try {
-        // load subjects to determine which are active now
+        // If current user is an instructor, determine the instructor doc (to restrict subjects)
+        let instructorDoc = null;
+        if (user?.uid) {
+          try {
+            const instrQ = query(collection(db, "instructors"), where("uid", "==", user.uid));
+            const instrSnap = await getDocs(instrQ);
+            if (!instrSnap.empty) {
+              const d = instrSnap.docs[0];
+              instructorDoc = { id: d.id, ...d.data() };
+            }
+          } catch (err) {
+            console.warn("Failed to resolve instructor doc:", err);
+          }
+        }
+
+        // load all subjects and pick active ones (and owned by instructor if applicable)
         const subsSnap = await getDocs(collection(db, "subjectList"));
         const activeSubjects = [];
         subsSnap.forEach((s) => {
@@ -107,14 +123,32 @@ const Dashboard = () => {
           const days = Array.isArray(data.days) ? data.days : [];
           const matchesDay =
             days.includes(dayShort) ||
-            days.includes(
-              new Date().toLocaleDateString("en-US", { weekday: "long" })
-            );
+            days.includes(new Date().toLocaleDateString("en-US", { weekday: "long" }));
           const withinTime =
-            !data.startTime ||
-            !data.endTime ||
-            (data.startTime <= nowHHMM && nowHHMM <= data.endTime);
-          if (data.active !== false && matchesDay && withinTime) {
+            !data.startTime || !data.endTime || (data.startTime <= nowHHMM && nowHHMM <= data.endTime);
+
+          // ownership check: if instructorDoc exists, only include subjects the instructor owns
+          let isOwned = true;
+          if (instructorDoc) {
+            const ownerChecks = [
+              data.instructorUid,
+              data.instructor,
+              data.owner,
+              data.instructorCode,
+              s.id,
+            ];
+            // consider subject owned if any of these matches instructorDoc.uid or instructorDoc.id or instructorDoc.code
+            isOwned = ownerChecks.some((v) => {
+              if (!v) return false;
+              if (v === user.uid) return true;
+              if (v === instructorDoc.id) return true;
+              if (instructorDoc.code && v === instructorDoc.code) return true;
+              if (instructorDoc.instructorCode && v === instructorDoc.instructorCode) return true;
+              return false;
+            });
+          }
+
+          if (data.active !== false && matchesDay && withinTime && isOwned) {
             activeSubjects.push({ id: s.id, ...data });
           }
         });
@@ -125,7 +159,6 @@ const Dashboard = () => {
         for (const subj of activeSubjects) {
           // attendance path: attendance/{dateStr}/{subjectId} -> docs keyed by studentID
           const subjColRef = collection(db, "attendance", dateStr, subj.id);
-          // fetch all docs to compute counts (could be optimized)
           const attSnap = await getDocs(subjColRef);
           const counts = { Present: 0, Absent: 0, Late: 0, Total: 0 };
           const subjEntries = [];
@@ -133,15 +166,9 @@ const Dashboard = () => {
           if (!attSnap.empty) {
             attSnap.forEach((d) => {
               const data = d.data() || {};
-              const status = normalizeStatus(
-                data.status || data.remark || data.remarks || data.remark?.toString()
-              );
+              const status = normalizeStatus(data.status ?? data.remark ?? data.remarks);
               counts[status] = (counts[status] || 0) + 1;
-              const ts = data.timestamp
-                ? data.timestamp.toDate
-                  ? data.timestamp.toDate().getTime()
-                  : new Date(data.timestamp).getTime()
-                : null;
+              const ts = data.timestamp ? (data.timestamp.toDate ? data.timestamp.toDate().getTime() : new Date(data.timestamp).getTime()) : null;
               subjEntries.push({
                 id: d.id,
                 subjectCode: subj.id,
@@ -169,21 +196,16 @@ const Dashboard = () => {
           allEntries = allEntries.concat(subjEntries);
         }
 
-        // sort allEntries by timestamp desc (fallback to timeIn if timestamp missing)
+        // sort allEntries by timestamp desc (fallback to timeIn)
         allEntries.sort((a, b) => {
-          const ta = a.timestamp || (a.timeIn ? new Date().setHours(
-            Number(a.timeIn.split(":")[0] || 0),
-            Number(a.timeIn.split(":")[1] || 0)
-          ) : 0);
-          const tb = b.timestamp || (b.timeIn ? new Date().setHours(
-            Number(b.timeIn.split(":")[0] || 0),
-            Number(b.timeIn.split(":")[1] || 0)
-          ) : 0);
+          const ta = a.timestamp ?? (a.timeIn ? (() => { const [hh, mm] = (a.timeIn || "00:00").split(":").map(Number); const d = new Date(); d.setHours(hh, mm, 0, 0); return d.getTime(); })() : 0);
+          const tb = b.timestamp ?? (b.timeIn ? (() => { const [hh, mm] = (b.timeIn || "00:00").split(":").map(Number); const d = new Date(); d.setHours(hh, mm, 0, 0); return d.getTime(); })() : 0);
           return tb - ta;
         });
 
         if (!cancelled) {
           setTodaySubjects(subjectsWithCounts);
+          // only show latest 5 entries from subjects the instructor owns (activeSubjects already filtered)
           setLatestTodayEntries(allEntries.slice(0, 5));
         }
       } catch (err) {
@@ -199,53 +221,65 @@ const Dashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, []); // run on mount
+  }, [user]); // re-run when auth user changes
 
   // === Chart aggregation (simple): scan attendance date docs that belong to selectedYear and aggregate by month ===
   useEffect(() => {
-    // build monthly aggregates for the selected year (returns array of 12 months)
     let cancelled = false;
     (async () => {
       try {
-        const monthShorts = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        // prepare months
+        const monthShorts = [
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "June",
+          "July",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec",
+        ];
         const map = {};
         monthShorts.forEach((m) => (map[m] = { month: m, Late: 0, Absent: 0, Present: 0 }));
 
-        // top-level attendance date docs (ids expected "YYYY-MM-DD")
+        // fetch all attendance date documents (top-level); doc ids assumed "YYYY-MM-DD"
         const datesSnap = await getDocs(collection(db, "attendance"));
         const dateDocs = datesSnap.docs.map((d) => d.id).filter((id) => id.startsWith(selectedYear));
 
-        // load subject ids once
+        // load subject list once for subcollection iteration
         const subsSnap = await getDocs(collection(db, "subjectList"));
         const subjectIds = subsSnap.docs.map((d) => d.id);
 
+        // for each date in selected year, for each subject, count statuses
         for (const dateId of dateDocs) {
-          if (cancelled) break;
+          // month index from dateId
           const parts = dateId.split("-");
           const mm = parts.length >= 2 ? Number(parts[1]) : NaN;
-          if (isNaN(mm) || mm < 1 || mm > 12) continue;
-          const monthKey = monthShorts[mm - 1];
+          const monthKey = !isNaN(mm) ? monthShorts[mm - 1] : null;
+          if (!monthKey || !map[monthKey]) continue;
 
-          // for each subject subcollection under this date, count entries
           for (const subjId of subjectIds) {
-            if (cancelled) break;
             try {
               const subjCol = collection(db, "attendance", dateId, subjId);
               const attSnap = await getDocs(subjCol);
               if (attSnap.empty) continue;
               attSnap.forEach((d) => {
                 const data = d.data() || {};
-                const raw = (data.status ?? data.remark ?? data.remarks ?? "").toString().trim().toLowerCase();
-                if (!raw) map[monthKey].Absent += 1;
-                else if (raw.includes("absent")) map[monthKey].Absent += 1;
+                const raw = (data.status || data.remark || "").toString().toLowerCase();
+                if (raw.includes("absent")) map[monthKey].Absent += 1;
                 else if (raw.includes("late")) map[monthKey].Late += 1;
-                else if (raw.includes("present")) map[monthKey].Present += 1;
-                else map[monthKey].Absent += 1; // ambiguous -> treat as Absent
+                else map[monthKey].Present += 1;
               });
             } catch (err) {
-              // ignore per-subject errors
+              // ignore subject missing or permission issues
             }
+            if (cancelled) break;
           }
+          if (cancelled) break;
         }
 
         const arr = Object.values(map);

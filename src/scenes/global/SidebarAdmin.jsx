@@ -17,7 +17,7 @@ const SidebarAdmin = () => {
     { name: "Dashboard", link: "/dashboard", icon: MdOutlineDashboard },
 
     // Attendance Record visible only to admin, guidance counselor, instructor
-    ...(role === "admin" || role === "guidance counselor" || role === "instructor"
+    ...(role === "admin" || role === "guidance" || role === "instructor"
       ? [{ name: "Attendance Record", link: "/attendancerecord", icon: MdOutlineRecordVoiceOver }]
       : []),
 
@@ -27,7 +27,7 @@ const SidebarAdmin = () => {
       : []),
 
     // Student Management visible to admin and registrar
-    ...(role === "admin" || role === "registrar"
+    ...(role === "admin" || role === "registrar"||role==="guidance"||role==="instructor"
       ? [{ name: "Student Management", link: "/studentmanagement", icon: IoMdPerson }]
       : []),
 

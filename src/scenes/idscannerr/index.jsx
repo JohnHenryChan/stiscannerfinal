@@ -10,6 +10,7 @@ import {
   where,
   setDoc,
   Timestamp,
+  FieldPath
 } from "firebase/firestore";
 import { db, storage } from "../../firebaseConfig";
 import { ref, getDownloadURL } from "firebase/storage";
@@ -27,11 +28,22 @@ const IDScanner = () => {
   const [success, setSuccess] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [showStudentCard, setShowStudentCard] = useState(null);
+  const [allStudents, setAllStudents] = useState([]);
+  const [allSubjects, setAllSubjects] = useState([]);
+
+  // readiness states (new)
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const systemReady = dataLoaded && modelsLoaded;
+  const systemReadyRef = useRef(false);
+  useEffect(() => { systemReadyRef.current = systemReady; }, [systemReady]);
 
   const [subjectChoices, setSubjectChoices] = useState([]);
   const [subjectModalOpen, setSubjectModalOpen] = useState(false);
   const [pendingStudent, setPendingStudent] = useState(null);
-
+  const pendingStudentRef = useRef(null); // <-- new
+  const subjectRef = useRef(null); // <-- track currently selected subject (sync)
+  
   const [faceModalOpen, setFaceModalOpen] = useState(false);
   const [faceAttempts, setFaceAttempts] = useState(0);
   const faceAttemptsRef = useRef(0);
@@ -54,6 +66,9 @@ const IDScanner = () => {
   const streamRef = useRef(null);
   const detectingRef = useRef(false);
   const framesDrawnRef = useRef(0);
+  const preloadedStreamRef = useRef(false); // <-- new: indicates stream was preloaded during startup
+  const preloadedVideoRef = useRef(null); // <-- hidden video element that holds the preloaded stream
+  const cdIntervalRef = useRef(null); // <-- cooldown interval ref (so we can clear it on close)
 
   // For face modal timer
   const [faceLastActivity, setFaceLastActivity] = useState(Date.now());
@@ -112,21 +127,178 @@ const IDScanner = () => {
   }, [faceModalOpen, cameraLoading, faceLastActivity]);
 
   /** ---------------------- DATA HELPERS ---------------------- */
-  const fetchStudentData = async (rfidTag) => {
-    try {
-      const q = query(collection(db, "students"), where("rfid", "==", rfidTag));
-      const querySnapshot = await getDocs(q);
-      if (!querySnapshot.empty) {
-        const docSnap = querySnapshot.docs[0];
-        return { id: docSnap.id, ...docSnap.data() };
+  useEffect(() => {
+    const loadAllStudents = async () => {
+      try {
+        const snapshot = await getDocs(collection(db, "students"));
+        const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        setAllStudents(data);
+        console.log(`Loaded ${data.length} students from Firestore`);
+        // additional debug: list of rfids -> student id
+        console.log("Cached students (sample):", data.slice(0,50).map(s => ({ id: s.id, rfid: s.rfid, name: s.name || `${s.firstName || ""} ${s.lastName || ""}`.trim() })));
+      } catch (err) {
+        console.error("Error loading student data:", err);
+        setError("Failed to load student data.");
       }
-      return null;
-    } catch (err) {
-      console.error("Error fetching student data:", err);
-      setError("Error fetching student data. Please try again.");
-      return null;
-    }
-  };
+    };
+
+    loadAllStudents();
+  }, []); // only runs once
+
+  useEffect(() => {
+    const preloadData = async () => {
+      try {
+        // ---- Load all students
+        const studentSnap = await getDocs(collection(db, "students"));
+        const students = studentSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+        // debug: show how many and sample rfids
+        console.log(`Preload: fetched ${students.length} students`);
+        console.log("Preload: student rfids sample:", students.slice(0,50).map(s => ({ id: s.id, rfid: s.rfid })));
+
+        // ---- Load all subjects + enrolled student IDs
+        const subjectSnap = await getDocs(collection(db, "subjectList"));
+        const subjects = [];
+        for (const subjDoc of subjectSnap.docs) {
+          const subjData = { id: subjDoc.id, ...subjDoc.data() };
+          // support both 'students' and 'studentList' subcollections
+          const studentsCol = collection(db, "subjectList", subjDoc.id, "students");
+          const enrolled = await getDocs(studentsCol);
+          // fallback to studentList if students subcollection empty
+          if (enrolled.empty) {
+            const altCol = collection(db, "subjectList", subjDoc.id, "studentList");
+            const altSnap = await getDocs(altCol);
+            subjData.studentIds = altSnap.docs.map(d => d.id);
+          } else {
+            subjData.studentIds = enrolled.docs.map(d => d.id);
+          }
+          subjects.push(subjData);
+        }
+
+        setAllStudents(students);
+        setAllSubjects(subjects);
+        console.log(`Cached ${students.length} students & ${subjects.length} subjects.`);
+        console.log("Cached subjects (sample):", subjects.slice(0,50).map(s => ({ id: s.id, subject: s.subject || s.name, studentCount: (s.studentIds||[]).length })));
+
+        // explicit full-cache debug (trimmed samples to avoid huge logs)
+        console.log("[Cache] allStudents count:", students.length);
+        console.log("[Cache] sample students:", students.slice(0,50).map(s => ({ id: s.id, rfid: s.rfid, name: s.name || `${s.firstName||''} ${s.lastName||''}`.trim() })));
+        console.log("[Cache] allSubjects count:", subjects.length);
+        console.log("[Cache] sample subjects:", subjects.slice(0,50).map(s => ({ id: s.id, subject: s.subject || s.name, studentCount: (s.studentIds||[]).length })));
+
+        // MARK DATA AS LOADED -> enables scanner when models also loaded
+        setDataLoaded(true);
+        console.log("[Startup] dataLoaded = true");
+      } catch (err) {
+        console.error("Startup data load failed:", err);
+        setError("Failed to load initial data.");
+        setDataLoaded(false);
+      }
+    };
+
+    // mark not-ready while starting preload
+    setDataLoaded(false);
+    preloadData();
+  }, []);
+
+// load face-api models before enabling scanning
+  useEffect(() => {
+    let mounted = true;
+    const loadModels = async () => {
+      try {
+        console.log("[Startup] Loading face-api models from /models (tiny, ssd, landmarks, recognition)...");
+
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri('/models'),
+          faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
+          faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+          faceapi.nets.faceRecognitionNet.loadFromUri('/models')
+        ]);
+        console.log("[Startup] face-api models loaded");
+        if (mounted) {
+          setModelsLoaded(true);
+          console.log("[Startup] modelsLoaded = true");
+        }
+      } catch (err) {
+        console.error("[Startup] Failed loading face-api models:", err);
+        if (mounted) {
+          setModelsLoaded(false);
+          setError("Failed to load face recognition models.");
+        }
+      }
+    };
+
+    setModelsLoaded(false);
+    loadModels();
+    return () => { mounted = false; };
+  }, []);
+
+// small readiness logger to help debugging why overlay persists
+  useEffect(() => {
+    console.log("[Startup] readiness", { dataLoaded, modelsLoaded, systemReady });
+  }, [dataLoaded, modelsLoaded, systemReady]);
+
+  // Preload camera on mount so permission prompt + stream are warmed before first face modal
+  useEffect(() => {
+    let cancelled = false;
+    const preloadCamera = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.debug("[Startup] getUserMedia not available");
+        return;
+      }
+      if (streamRef.current) return;
+      try {
+        console.debug("[Startup] attempting camera preload...");
+        const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+        if (cancelled) {
+          s.getTracks().forEach((t) => { try { t.stop(); } catch (e) {} });
+          return;
+        }
+
+        // attach the stream to a hidden video element so autoplay/policy is satisfied
+        try {
+          const hidden = document.createElement("video");
+          hidden.muted = true;
+          hidden.playsInline = true;
+          hidden.autoplay = true;
+          hidden.style.position = "fixed";
+          hidden.style.left = "-10000px";
+          hidden.style.width = "1px";
+          hidden.style.height = "1px";
+          hidden.srcObject = s;
+          document.body.appendChild(hidden);
+          await hidden.play().catch((e) => { console.debug("[Startup] hidden video play blocked:", e); });
+          preloadedVideoRef.current = hidden;
+        } catch (e) {
+          console.warn("[Startup] failed creating hidden video for preload:", e);
+        }
+
+        streamRef.current = s;
+        preloadedStreamRef.current = true;
+        console.log("[Startup] camera preloaded");
+      } catch (err) {
+        console.warn("[Startup] camera preload failed:", err);
+      }
+    };
+
+    // Try preload immediately on mount (so permission happens early)
+    preloadCamera();
+    return () => {
+      cancelled = true;
+      // cleanup hidden video if mount unmounts before using it
+      try {
+        if (preloadedVideoRef.current) {
+          preloadedVideoRef.current.pause();
+          if (preloadedVideoRef.current.srcObject) {
+            preloadedVideoRef.current.srcObject.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+          }
+          preloadedVideoRef.current.remove();
+          preloadedVideoRef.current = null;
+        }
+      } catch (e) {}
+    };
+  }, []);
+
 
   const getCurrentSubjectsInSession = async () => {
     const now = new Date();
@@ -206,7 +378,19 @@ const IDScanner = () => {
   /** ---------------------- RFID HANDLER ---------------------- */
   const handleRFIDDetection = useCallback(
     async (rfidTag) => {
-      if (isScanning || faceModalOpen) return;
+      console.log("[RFID] scanned:", rfidTag);
+
+      // block scans until system is fully ready
+      if (!systemReadyRef.current) {
+        console.warn("[RFID] Ignored - system not ready yet");
+        setError("System initializing — please wait a moment.");
+        return;
+      }
+
+      if (isScanning || faceModalOpen) {
+        console.log("[RFID] ignoring scan - scanner busy or face modal open", { isScanning, faceModalOpen });
+        return;
+      }
 
       setIsScanning(true);
       setError(null);
@@ -214,57 +398,73 @@ const IDScanner = () => {
 
       if (showStudentCard) {
         setShowStudentCard(null);
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 200));
       }
 
-      const studentData = await fetchStudentData(rfidTag);
-      const subjects = await getCurrentSubjectsInSession();
+      const studentData = allStudents.find(s => s.rfid === rfidTag);
+      // improved lookup logging
+      console.log("[RFID] lookup result:", studentData ? { id: studentData.id, name: studentData.name || `${studentData.firstName||""} ${studentData.lastName||""}`.trim(), rfid: studentData.rfid } : null);
+
+      // if cached students empty, show helpful debug
+      if (!allStudents || allStudents.length === 0) {
+        console.warn("[RFID] cache empty: no students cached yet");
+      }
 
       if (!studentData) {
-        setError("Student not found in database.");
+        setError("Student not found in cached data.");
         setIsScanning(false);
         return;
       }
 
-      if (subjects.length > 0) {
-        let availableSubjects = [];
+      // ---- filter subjects active right now
+      const now = new Date();
+      const currentDay = now.toLocaleDateString("en-US", { weekday: "short" });
+      const currentTime = now.toTimeString().slice(0, 5);
 
-        for (const subject of subjects) {
-          const studentsCol = collection(db, "subjectList", subject.id, "students");
-          const studentDocs = await getDocs(studentsCol);
-          const enrolledStudentIds = studentDocs.docs.map((doc) => doc.id);
+      const activeSubjects = allSubjects.filter(sub =>
+        sub.active !== false &&
+        sub.days?.includes(currentDay) &&
+        sub.startTime <= currentTime &&
+        currentTime <= sub.endTime
+      );
 
-          if (enrolledStudentIds.includes(studentData.id)) {
-            availableSubjects.push(subject);
-          }
-        }
+      console.log("[RFID] activeSubjects count:", activeSubjects.length, "for time", currentDay, currentTime);
+      // show which active subjects include the student
+      const availableSubjects = activeSubjects.filter(sub =>
+        sub.studentIds?.includes(studentData.id)
+      );
 
-        if (availableSubjects.length === 0) {
-          setError("Student is not enrolled in a subject for this session.");
-          setIsScanning(false);
-          return;
-        }
+      // fixed syntax (removed extra ')') and added mapping log
+      console.log("[RFID] subjects matched for student:", availableSubjects.map(s => ({ id: s.id, subject: s.subject || s.name, subjectCode: s.subjectCode })));
 
-        if (availableSubjects.length > 1) {
-          setSubjectChoices(availableSubjects);
-          setPendingStudent(studentData);
-          setSubjectModalOpen(true);
-        } else {
-          studentData._subjectName = availableSubjects[0].subject;
-          studentData._subjectStartTime = availableSubjects[0].startTime;
-          setPendingStudent(studentData);
-          setSubjectChoices([availableSubjects[0]]);
-          setFaceModalOpen(true);
-          setFaceLastActivity(Date.now()); // Reset timer on open
-          await startFaceStream(studentData);
-        }
+      if (availableSubjects.length === 0) {
+        setError("Student is not enrolled in a subject for this session.");
+        setIsScanning(false);
+        return;
+      }
+
+      if (availableSubjects.length > 1) {
+        setSubjectChoices(availableSubjects);
+        subjectRef.current = null; // require user selection
+        setPendingStudent(studentData);
+        pendingStudentRef.current = studentData; // <-- sync ref
+        setSubjectModalOpen(true);
       } else {
-        setError("No active subject sessions at this time.");
+        const subject = availableSubjects[0];
+        studentData._subjectName = subject.subject;
+        studentData._subjectStartTime = subject.startTime;
+        setPendingStudent(studentData);
+        pendingStudentRef.current = studentData; // <-- sync ref
+        setSubjectChoices([subject]);
+        subjectRef.current = subject; // <-- set selected subject synchronously
+        setFaceModalOpen(true);
+        setFaceLastActivity(Date.now());
+        await startFaceStream(studentData);
       }
 
       setIsScanning(false);
     },
-    [isScanning, faceModalOpen, showStudentCard]
+    [isScanning, faceModalOpen, showStudentCard, allStudents, allSubjects]
   );
 
   // RFID keyboard emulation
@@ -275,6 +475,9 @@ const IDScanner = () => {
     const handleKeyDown = (e) => {
       if (timeout) clearTimeout(timeout);
       if (faceModalOpen) return;
+
+      // ignore keyboard RFID emulation until system ready
+      if (!systemReadyRef.current) return;
 
       if (/^\d$/.test(e.key)) {
         rfidBuffer += e.key;
@@ -413,37 +616,102 @@ const IDScanner = () => {
     try {
       setCameraLoading(true);
       framesDrawnRef.current = 0;
-      // cleanup any previous streams
-      stopFaceStream();
 
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
-      streamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.muted = true;
-        videoRef.current.playsInline = true;
-        try {
-          await videoRef.current.play();
-          console.debug("[startFaceStream] video.play() succeeded");
-        } catch (err) {
-          console.warn("[startFaceStream] video.play() failed (autoplay blocked) — continuing", err);
-        }
-        startRenderLoop();
-      } else {
-        console.warn("[startFaceStream] videoRef not mounted yet — will retry attach");
-        const attachId = setInterval(() => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = streamRef.current;
+      // If we already preloaded a stream, reuse it instead of requesting a fresh one.
+      // Do NOT call stopFaceStream() here if using the preloaded stream.
+      if (streamRef.current && preloadedStreamRef.current) {
+        console.debug("[startFaceStream] attaching preloaded stream to video");
+        const stream = streamRef.current;
+        if (videoRef.current) {
+          // attach stream to visible video
+          try {
+            videoRef.current.srcObject = stream;
             videoRef.current.muted = true;
             videoRef.current.playsInline = true;
-            videoRef.current.play().catch(() => {});
+            await videoRef.current.play().catch((e) => { console.debug("[startFaceStream] visible video play blocked:", e); });
             startRenderLoop();
-            clearInterval(attachId);
-            console.debug("[startFaceStream] attached stream after retry");
+          } catch (e) {
+            console.warn("[startFaceStream] failed attach/play preloaded stream:", e);
+            // fallback: try reattaching after a short delay
+            const retryId = setTimeout(async () => {
+              try {
+                if (videoRef.current) {
+                  videoRef.current.srcObject = stream;
+                  videoRef.current.muted = true;
+                  videoRef.current.playsInline = true;
+                  await videoRef.current.play().catch(() => {});
+                  startRenderLoop();
+                }
+              } catch (err) { console.warn("retry attach failed:", err); }
+              clearTimeout(retryId);
+            }, 300);
           }
-        }, 250);
-        setTimeout(() => clearInterval(attachId), 5000);
+
+          // remove hidden holder now that visible video has the stream
+          try {
+            if (preloadedVideoRef.current) {
+              preloadedVideoRef.current.pause();
+              preloadedVideoRef.current.remove();
+              preloadedVideoRef.current = null;
+            }
+          } catch (e) { /* ignore */ }
+        } else {
+          console.warn("[startFaceStream] videoRef not mounted yet — will attach when available (retrying)");
+          // Retry attaching the preloaded stream until the visible video mounts (timeout after 5s)
+          const attachId = setInterval(async () => {
+            if (!videoRef.current) return;
+            try {
+              videoRef.current.srcObject = stream;
+              videoRef.current.muted = true;
+              videoRef.current.playsInline = true;
+              await videoRef.current.play().catch(() => {});
+              startRenderLoop();
+              // remove hidden holder once visible video is active
+              if (preloadedVideoRef.current) {
+                try { preloadedVideoRef.current.pause(); preloadedVideoRef.current.remove(); } catch (e) {}
+                preloadedVideoRef.current = null;
+              }
+            } catch (e) {
+              console.warn("[startFaceStream] retry attach failed:", e);
+              return;
+            } finally {
+              clearInterval(attachId);
+            }
+          }, 200);
+          setTimeout(() => clearInterval(attachId), 5000);
+        }
+      } else {
+        // cleanup any previous streams and request a new one
+        stopFaceStream();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false });
+        streamRef.current = stream;
+        preloadedStreamRef.current = false; // this is a fresh runtime stream, not the startup preloaded marker
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.muted = true;
+          videoRef.current.playsInline = true;
+          try {
+            await videoRef.current.play();
+          } catch (err) {
+            console.warn("[startFaceStream] video.play() failed (autoplay blocked) — continuing", err);
+          }
+          startRenderLoop();
+        } else {
+          console.warn("[startFaceStream] videoRef not mounted yet — will retry attach");
+          const attachId = setInterval(() => {
+            if (videoRef.current) {
+              videoRef.current.srcObject = streamRef.current;
+              videoRef.current.muted = true;
+              videoRef.current.playsInline = true;
+              videoRef.current.play().catch(() => {});
+              startRenderLoop();
+              clearInterval(attachId);
+              console.debug("[startFaceStream] attached stream after retry");
+            }
+          }, 250);
+          setTimeout(() => clearInterval(attachId), 5000);
+        }
       }
 
       const descriptor = await loadReferenceDescriptor(student);
@@ -465,6 +733,18 @@ const IDScanner = () => {
   };
 
   const stopFaceStream = useCallback(() => {
+    // remove hidden preloaded video if present
+    if (preloadedVideoRef.current) {
+      try {
+        preloadedVideoRef.current.pause();
+        if (preloadedVideoRef.current.srcObject) {
+          preloadedVideoRef.current.srcObject.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+        }
+        preloadedVideoRef.current.remove();
+      } catch (e) { console.warn("failed to cleanup preloadedVideo:", e); }
+      preloadedVideoRef.current = null;
+    }
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => {
         try { t.stop(); } catch (e) {}
@@ -477,14 +757,66 @@ const IDScanner = () => {
     }
     stopRenderLoop();
     detectingRef.current = false;
+    preloadedStreamRef.current = false; // clear preload marker when stream stopped
   }, [stopRenderLoop]);
 
+  // CENTRALIZED cleanup helper for verification/modal lifecycle
+  // stopStream: if true, actually stop media tracks; if false, detach visible video but keep preloaded stream running
+  const cleanupVerificationResources = useCallback((opts = { stopStream: false }) => {
+    // clear verification interval
+    if (loopIntervalRef.current) {
+      try { clearInterval(loopIntervalRef.current); } catch (e) {}
+      loopIntervalRef.current = null;
+    }
+
+    // clear cooldown interval
+    if (cdIntervalRef.current) {
+      try { clearInterval(cdIntervalRef.current); } catch (e) {}
+      cdIntervalRef.current = null;
+    }
+
+    // stop rendering to canvas and detach visible video (but keep preloaded stream if requested)
+    try { stopRenderLoop(); } catch (e) {}
+    detectingRef.current = false;
+
+    try {
+      if (videoRef.current) {
+        try { videoRef.current.pause(); } catch (e) {}
+        try { videoRef.current.srcObject = null; } catch (e) {}
+      }
+    } catch (e) { console.warn("cleanup: detach visible video failed", e); }
+
+    // clear reference descriptor so next scan loads fresh descriptor
+    refDescriptorRef.current = null;
+
+    // reset attempt/status UI immediately
+    setFaceAttempts(0);
+    faceAttemptsRef.current = 0;
+    setLastAttemptStatus(null);
+    setCameraLoading(false);
+
+    // clear pending selections
+    setPendingStudent(null);
+    pendingStudentRef.current = null;
+    subjectRef.current = null;
+
+    // optionally stop actual media tracks (used for full teardown)
+    if (opts.stopStream) {
+      try { stopFaceStream(); } catch (e) { console.warn("cleanup: stopFaceStream failed", e); }
+    }
+  }, [stopFaceStream, stopRenderLoop]);
+
   useEffect(() => {
-    return () => stopFaceStream();
+    return () => {
+      // full teardown on unmount - stop everything
+      cleanupVerificationResources({ stopStream: true });
+      try { stopFaceStream(); } catch (e) {}
+    };
   }, [stopFaceStream]);
 
   /** ---------------------- VERIFICATION LOOP ---------------------- */
   const startVerificationLoop = useCallback(() => {
+    // prevent multiple intervals
     if (loopIntervalRef.current) return;
 
     faceAttemptsRef.current = 0;
@@ -521,54 +853,61 @@ const IDScanner = () => {
           if (dist != null && dist < MATCH_THRESHOLD) {
             setLastAttemptStatus("success");
             setFaceLastActivity(Date.now()); // Reset timer on success
+
             await logAudit({
               subjectCode: subjectChoices?.[0]?.subjectCode,
-              studentId: pendingStudent?.id,
-              studentData: pendingStudent,
+              studentId: pendingStudentRef.current?.id,
+              studentData: pendingStudentRef.current,
               status: "success",
               distance: dist,
             });
 
-            const subject = subjectChoices[0];
-            if (pendingStudent) {
-              pendingStudent._subjectName = subject.subject;
-              pendingStudent._subjectStartTime = subject.startTime;
-              const logged = await logAttendance(subject.subjectCode, pendingStudent.id, pendingStudent);
+            // Resolve selected subject robustly (use ref first, fallback to state)
+            const subject = subjectRef.current || (subjectChoices && subjectChoices[0]);
+            const subjectName = subject?.subject || subject?.name || subject?.subjectCode || null;
+            const subjectStart = subject?.startTime || subject?.start || "00:00";
 
+            // ...existing validation...
+
+            // proceed with attendance using safe values
+            if (pendingStudentRef.current) {
+              const ps = pendingStudentRef.current;
+              ps._subjectName = subjectName;
+              ps._subjectStartTime = subjectStart;
+              const subjectCode = subject?.subjectCode || subjectName;
+              const logged = await logAttendance(subjectCode, ps.id, ps);
+
+              console.log("[attendance] attempted", { subjectCode, studentId: ps.id, logged });
               if (logged) {
-                setSuccess(`Attendance logged for ${subject.subject}`);
+                setSuccess(`Attendance logged for ${subjectName}`);
                 setShowStudentCard({
-                  name: `${pendingStudent.firstName || ""} ${pendingStudent.lastName || ""}`.trim(),
-                  year: pendingStudent.year || pendingStudent.yearLevel || "N/A",
-                  subject: subject.subject,
+                  name: `${ps.firstName || ""} ${ps.lastName || ""}`.trim(),
+                  year: ps.year || ps.yearLevel || "N/A",
+                  subject: subjectName,
                   time: new Date().toLocaleTimeString(),
                 });
               } else {
-                setError(`Already scanned for ${subject.subject} today.`);
+                setError(`Already scanned for ${subjectName} today.`);
               }
             } else {
               setError("Pending student missing.");
+              console.error("Pending student missing (ref is null)");
             }
 
-            // Apply cooldown after success
-            setCooldown(COOLDOWN_SECONDS);
-            const cdInterval = setInterval(() => {
-              setCooldown((prev) => {
-                if (prev <= 1) {
-                  clearInterval(cdInterval);
-                  return 0;
-                }
-                return prev - 1;
-              });
-            }, 1000);
-
-            // cleanup
-            setFaceModalOpen(false);
-            stopFaceStream();
+            // clear the visible "success/fail" text immediately so it doesn't linger during close anim
+            setLastAttemptStatus(null);
             setFaceAttempts(0);
             faceAttemptsRef.current = 0;
-            refDescriptorRef.current = null;
-            setPendingStudent(null);
+
+            // animate modal close then cleanup resources (do NOT stop preloaded stream here)
+            setFaceClosing(true);
+            setTimeout(() => {
+              setFaceModalOpen(false);
+              setFaceClosing(false);
+
+              // cleanup verification resources but keep preloaded stream alive
+              cleanupVerificationResources({ stopStream: false });
+            }, 300);
             return;
           } else if (refDescriptorRef.current) {
             // failed attempt
@@ -579,18 +918,25 @@ const IDScanner = () => {
 
             await logAudit({
               subjectCode: subjectChoices?.[0]?.subjectCode,
-              studentId: pendingStudent?.id,
-              studentData: pendingStudent,
+              studentId: pendingStudentRef.current?.id,
+              studentData: pendingStudentRef.current,
               status: "fail",
               distance: dist,
             });
 
-            // cooldown after fail
+            // cooldown after fail (store interval so it can be cleared on modal close)
             setCooldown(COOLDOWN_SECONDS);
-            const cdInterval = setInterval(() => {
+            if (cdIntervalRef.current) {
+              clearInterval(cdIntervalRef.current);
+              cdIntervalRef.current = null;
+            }
+            cdIntervalRef.current = setInterval(() => {
               setCooldown((prev) => {
                 if (prev <= 1) {
-                  clearInterval(cdInterval);
+                  if (cdIntervalRef.current) {
+                    clearInterval(cdIntervalRef.current);
+                    cdIntervalRef.current = null;
+                  }
                   return 0;
                 }
                 return prev - 1;
@@ -598,10 +944,16 @@ const IDScanner = () => {
             }, 1000);
 
             if (faceAttemptsRef.current >= MAX_ATTEMPTS) {
+              // clear verification interval before full failure cleanup
+              if (loopIntervalRef.current) {
+                clearInterval(loopIntervalRef.current);
+                loopIntervalRef.current = null;
+              }
+
               await logAudit({
                 subjectCode: subjectChoices?.[0]?.subjectCode,
-                studentId: pendingStudent?.id,
-                studentData: pendingStudent,
+                studentId: pendingStudentRef.current?.id,
+                studentData: pendingStudentRef.current,
                 status: "error",
                 distance: dist,
               });
@@ -613,24 +965,34 @@ const IDScanner = () => {
               faceAttemptsRef.current = 0;
               refDescriptorRef.current = null;
               setPendingStudent(null);
+              pendingStudentRef.current = null;
+              detectingRef.current = false;
               return;
             }
           }
         }
       } catch (err) {
         console.error("[verification loop] error:", err);
+        // ensure interval is cleared on unexpected errors
+        if (loopIntervalRef.current) {
+          clearInterval(loopIntervalRef.current);
+          loopIntervalRef.current = null;
+        }
         await logAudit({
           subjectCode: subjectChoices?.[0]?.subjectCode,
-          studentId: pendingStudent?.id,
-          studentData: pendingStudent,
+          studentId: pendingStudentRef.current?.id,
+          studentData: pendingStudentRef.current,
           status: "error",
           distance: null,
         });
+        setFaceModalOpen(false);
+        cleanupVerificationResources({ stopStream: false });
+        detectingRef.current = false;
       } finally {
         detectingRef.current = false;
       }
     }, DETECTION_INTERVAL_MS);
-  }, [cooldown, drawFrame, pendingStudent, subjectChoices, stopFaceStream]);
+  }, [cooldown, drawFrame, subjectChoices, stopFaceStream]);
 
   /** ---------------------- UI ---------------------- */
   const backdash = () => navigate("/dashboard");
@@ -638,7 +1000,10 @@ const IDScanner = () => {
   return (
     <div className="flex flex-col items-center justify-start min-h-screen bg-gradient-to-b from-gray-200 to-gray-100 relative">
       {/* Header */}
-      <header className="w-full py-4 shadow-md text-center text-xl font-semibold flex items-center justify-between px-4" style={{ backgroundColor: "#0057A4" }}>
+      <header
+        className="w-full py-4 shadow-md text-center text-xl font-semibold flex items-center justify-between px-4"
+        style={{ backgroundColor: "#0057A4" }}
+      >
         <button onClick={backdash} className="flex items-center text-white hover:text-blue-200">
           <ArrowBackIcon className="mr-2" /> Back
         </button>
@@ -656,22 +1021,43 @@ const IDScanner = () => {
         <div className="text-center my-6">
           <p className="text-4xl font-bold">{currentTime.toLocaleTimeString()}</p>
           <p className="text-gray-600 mt-2 text-lg">
-            {currentTime.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+            {currentTime.toLocaleDateString("en-US", {
+              weekday: "long",
+              year: "numeric",
+              month: "long",
+              day: "numeric",
+            })}
           </p>
         </div>
 
         {/* System message */}
-        <div className={`w-full py-3 text-center rounded-lg font-medium mb-6 ${
-            isScanning ? "bg-blue-100 text-blue-700" : error ? "bg-red-100 text-red-700" : success ? "bg-green-100 text-green-700" : "bg-blue-100 text-blue-700"
-          }`}>
+        <div
+          className={`w-full py-3 text-center rounded-lg font-medium mb-6 ${
+            isScanning
+              ? "bg-blue-100 text-blue-700"
+              : error
+              ? "bg-red-100 text-red-700"
+              : success
+              ? "bg-green-100 text-green-700"
+              : "bg-blue-100 text-blue-700"
+          }`}
+        >
           {isScanning ? "Scanning..." : error ? error : success ? success : "Waiting for scan..."}
         </div>
       </div>
 
-      {/* Student Card (NO buttons) */}
+      {/* Student Card */}
       {showStudentCard && (
-        <div className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${cardClosing ? "opacity-0" : "opacity-100"}`}>
-          <div className={`bg-white p-6 rounded-xl shadow-2xl text-center w-96 transform transition-all duration-300 ${cardClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"}`}>
+        <div
+          className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${
+            cardClosing ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          <div
+            className={`bg-white p-6 rounded-xl shadow-2xl text-center w-96 transform transition-all duration-300 ${
+              cardClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"
+            }`}
+          >
             <h2 className="text-2xl font-bold text-gray-800 mb-2">{showStudentCard.name}</h2>
             <p className="text-gray-600 mb-1">Year: {showStudentCard.year}</p>
             <p className="text-gray-600 mb-3">Subject: {showStudentCard.subject}</p>
@@ -680,28 +1066,40 @@ const IDScanner = () => {
         </div>
       )}
 
-      {/* Subject Modal (KEEP subject selection buttons) */}
+      {/* Subject Modal */}
       {subjectModalOpen && (
-        <div className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${subjectClosing ? "opacity-0" : "opacity-100"}`}>
-          <div className={`bg-white p-6 rounded-xl shadow-2xl w-96 text-center transform transition-all duration-300 ${subjectClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"}`}>
-            <h2 className="text-xl font-bold text-gray-800 mb-4 text-center">Select Subject</h2>
+        <div
+          className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${
+            subjectClosing ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          <div
+            className={`bg-white p-6 rounded-xl shadow-2xl w-96 text-center transform transition-all duration-300 ${
+              subjectClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"
+            }`}
+          >
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Select Subject</h2>
             <div className="flex flex-col space-y-2">
               {subjectChoices.map((subj) => (
                 <button
                   key={subj.id}
                   onClick={async () => {
-                    const student = { ...pendingStudent };
+                    const student = { ...(pendingStudentRef.current || pendingStudent) };
                     student._subjectName = subj.subject;
                     student._subjectStartTime = subj.startTime;
                     student._subjectCode = subj.subjectCode;
+                    setPendingStudent(student);
+                    pendingStudentRef.current = student;
+                    setSubjectChoices([subj]);
+                    subjectRef.current = subj;
                     setSubjectModalOpen(false);
                     setFaceModalOpen(true);
-                    setFaceLastActivity(Date.now()); // Reset timer on open
+                    setFaceLastActivity(Date.now());
                     await startFaceStream(student);
                   }}
                   className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md"
                 >
-                  {subj.subject}
+                  {subj.subject || subj.name || subj.id}
                 </button>
               ))}
             </div>
@@ -709,19 +1107,35 @@ const IDScanner = () => {
         </div>
       )}
 
-      {/* Face Verification Modal (NO Cancel / Retry buttons) */}
+      {/* Face Verification Modal */}
       {faceModalOpen && (
-        <div className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 transition-opacity duration-300 ${faceClosing ? "opacity-0" : "opacity-100"}`}>
-          <div className={`bg-white p-4 sm:p-6 rounded-xl shadow-2xl w-[95%] sm:w-[90%] max-w-md text-center transform transition-all duration-300 ${faceClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"}`}>
+        <div
+          className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 transition-opacity duration-300 ${
+            faceClosing ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          <div
+            className={`bg-white p-4 sm:p-6 rounded-xl shadow-2xl w-[95%] sm:w-[90%] max-w-md text-center transform transition-all duration-300 ${
+              faceClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"
+            }`}
+          >
             <h2 className="text-lg sm:text-xl font-bold text-gray-800 mb-4">Face Verification</h2>
 
-            <div className="relative w-full flex justify-center">
-              <video ref={videoRef} autoPlay muted playsInline className="rounded-lg shadow-md" style={{ width: "100%", maxHeight: "60vh" }} />
-              <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full rounded-lg" />
+            <div className="relative w-full flex justify-center mb-4">
+              <video
+                ref={videoRef}
+                autoPlay
+                muted
+                playsInline
+                className="rounded-lg shadow-md w-full"
+                style={{ maxHeight: "60vh" }}
+              />
+              <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full rounded-lg pointer-events-none" />
             </div>
 
-            <div className="mt-4 text-gray-600 text-sm">{cameraLoading ? "Loading camera..." : `Attempts: ${faceAttempts} / ${MAX_ATTEMPTS}`}</div>
-
+            <div className="text-sm text-gray-600 mt-1">
+              {cameraLoading ? "Loading camera..." : `Attempts: ${faceAttempts} / ${MAX_ATTEMPTS}`}
+            </div>
             {lastAttemptStatus && (
               <div className={`mt-2 font-semibold ${lastAttemptStatus === "success" ? "text-green-600" : "text-red-600"}`}>
                 {lastAttemptStatus === "success" ? "✅ Face verified successfully!" : "❌ Face not recognized. Try again."}
@@ -729,11 +1143,15 @@ const IDScanner = () => {
             )}
 
             {cooldown > 0 && (
-              <div className="mt-1 text-gray-500 text-sm">Please wait {cooldown} second{cooldown > 1 ? "s" : ""} before retrying...</div>
+              <div className="mt-1 text-gray-500 text-sm">
+                Please wait {cooldown} second{cooldown > 1 ? "s" : ""} before retrying...
+              </div>
             )}
           </div>
         </div>
       )}
+
+      {/* cleanup hook moved above return (hooks must be top-level) */}
     </div>
   );
 };

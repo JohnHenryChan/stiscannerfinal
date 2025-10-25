@@ -1,21 +1,8 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Box,
-  Button,
-  TextField,
-  Typography,
-  Paper,
-  Alert,
-} from "@mui/material";
-import { updatePassword } from "firebase/auth";
-import {
-  collection,
-  query,
-  where,
-  getDocs,
-  updateDoc,
-} from "firebase/firestore";
+import { Box, Button, TextField, Typography, Paper, Alert } from "@mui/material";
+import { updatePassword, signOut } from "firebase/auth";
+import { collection, query, where, getDocs, updateDoc } from "firebase/firestore";
 import { auth, db } from "../../firebaseConfig";
 import { useAuth } from "../../context/AuthContext";
 
@@ -26,35 +13,57 @@ const PasswordReset = () => {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const DEFAULT_PASSWORD = "test123A";
 
   const handleChangePassword = async () => {
     setError("");
-    setSuccess("");
 
     if (!newPassword || !confirmPassword) {
-      return setError("Both fields are required.");
+      setError("Both fields are required.");
+      return;
     }
-
     if (newPassword !== confirmPassword) {
-      return setError("Passwords do not match.");
+      setError("Passwords do not match.");
+      return;
+    }
+    if (newPassword === DEFAULT_PASSWORD) {
+      setError("New password cannot be the default password.");
+      return;
+    }
+    if (!auth.currentUser) {
+      setError("No authenticated user found.");
+      return;
     }
 
+    setLoading(true);
     try {
       await updatePassword(auth.currentUser, newPassword);
 
-      const q = query(collection(db, "instructors"), where("uid", "==", user.uid));
-      const snap = await getDocs(q);
-
-      if (!snap.empty) {
-        const instructorRef = snap.docs[0].ref;
-        await updateDoc(instructorRef, { mustChangePassword: false });
+      // clear mustChangePassword flag on instructor doc if applicable (non-fatal)
+      try {
+        const q = query(collection(db, "instructors"), where("uid", "==", user?.uid || ""));
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const instructorRef = snap.docs[0].ref;
+          await updateDoc(instructorRef, { mustChangePassword: false });
+        }
+      } catch (e) {
+        // ignore
       }
 
-      setSuccess("Password updated successfully. Redirecting...");
-      setTimeout(() => navigate("/dashboard"), 1000);
+      // immediately sign out and redirect to login
+      try {
+        await signOut(auth);
+      } catch (e) {
+        // ignore signOut errors
+      }
+      navigate("/login");
     } catch (err) {
-      setError("Password update failed: " + err.message);
+      setError("Password update failed: " + (err?.message || err));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -67,16 +76,12 @@ const PasswordReset = () => {
       minHeight="100vh"
       bgcolor="#f5f5f5"
     >
-      <Paper
-        elevation={3}
-        sx={{ padding: 4, width: 400, display: "flex", flexDirection: "column" }}
-      >
+      <Paper elevation={3} sx={{ padding: 4, width: 400, display: "flex", flexDirection: "column" }}>
         <Typography variant="h5" fontWeight="bold" mb={3}>
           Change Your Password
         </Typography>
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        {success && <Alert severity="success" sx={{ mb: 2 }}>{success}</Alert>}
 
         <TextField
           fullWidth
@@ -103,8 +108,9 @@ const PasswordReset = () => {
           variant="contained"
           sx={{ mt: 3, backgroundColor: "#0054a6" }}
           onClick={handleChangePassword}
+          disabled={loading}
         >
-          Update Password
+          {loading ? "Updating..." : "Update Password"}
         </Button>
       </Paper>
     </Box>

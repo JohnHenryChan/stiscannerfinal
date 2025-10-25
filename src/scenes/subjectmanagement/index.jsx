@@ -16,6 +16,8 @@ import {
   setDoc,
   updateDoc,
   getDocs,
+  getDoc,
+  writeBatch,
 } from "firebase/firestore";
 import { useAuth } from "../../context/AuthContext";
 
@@ -36,6 +38,11 @@ const SubjectManagement = () => {
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [subjectToDeleteIndex, setSubjectToDeleteIndex] = useState(null);
 
+  // Confirm-change modal state (for subjectCode changes)
+  const [confirmChangeVisible, setConfirmChangeVisible] = useState(false);
+  const [pendingChangeData, setPendingChangeData] = useState(null);
+  const [pendingOldId, setPendingOldId] = useState(null);
+
   // 🔹 Fetch subjects from Firestore
   useEffect(() => {
     let unsubscribe;
@@ -43,6 +50,7 @@ const SubjectManagement = () => {
     const fetchSubjects = async () => {
       if (!user) return;
 
+      // Admin & Registrar: full list + full controls
       if (user.role === "admin" || user.role === "registrar") {
         unsubscribe = onSnapshot(collection(db, "subjectList"), (snapshot) => {
           const data = snapshot.docs.map((doc) => ({
@@ -51,10 +59,26 @@ const SubjectManagement = () => {
           }));
           setSubjects(data);
         });
-      } else {
+        return;
+      }
+
+      // Guidance: view-only but see ALL subjects
+      if (user.role === "guidance") {
+        unsubscribe = onSnapshot(collection(db, "subjectList"), (snapshot) => {
+          const data = snapshot.docs.map((doc) => ({
+            ...doc.data(),
+            id: doc.id,
+          }));
+          setSubjects(data);
+        });
+        return;
+      }
+
+      // Instructor: only subjects listed in their instructor doc (no modify controls)
+      try {
         const instructorsSnap = await getDocs(collection(db, "instructors"));
         const instructorDoc = instructorsSnap.docs.find(
-          (doc) => doc.data().uid === user.uid
+          (d) => d.data()?.uid === user.uid || d.id === user.instructorCode || d.data()?.instructorCode === user.instructorCode
         );
 
         if (!instructorDoc) {
@@ -81,6 +105,9 @@ const SubjectManagement = () => {
             }));
           setSubjects(filtered);
         });
+      } catch (err) {
+        console.warn("Failed to load instructor subjects:", err);
+        setSubjects([]);
       }
     };
 
@@ -119,11 +146,234 @@ const SubjectManagement = () => {
   };
   const handleCloseSubject = () => setIsSubjectOpen(false);
 
-  const handleSubjectSubmit = (data) => {
-    setIsSubjectOpen(false);
-    const subjectID = data.subjectCode;
-    setDoc(doc(db, "subjectList", subjectID), data, { merge: true });
-    setEditingData(null);
+  const handleSubjectSubmit = async (data, hasWarning = false) => {
+    try {
+      const newCode = data.subjectCode;
+      if (editingData) {
+        const oldId = editingData.id || editingData.subjectCode;
+
+        // if code unchanged -> update existing doc
+        if (newCode === oldId) {
+          await setDoc(doc(db, "subjectList", oldId), data, { merge: true });
+          setIsSubjectOpen(false);
+          setEditingData(null);
+          return;
+        }
+
+        // Duplicate check / blocking warnings are handled inside the Subject modal (so they show
+        // in the same UI place). Proceed here assuming the modal already validated duplicates.
+ 
+        // code changed -> if there is a warning, show confirm modal and keep Subject open
+        if (hasWarning) {
+          setPendingChangeData(data);
+          setPendingOldId(oldId);
+          setConfirmChangeVisible(true);
+          return;
+        }
+ 
+        // no warning -> proceed with migration immediately (same logic as performed when user confirms)
+        let newDocData = { ...data };
+ 
+        // read old subject doc to copy inline student list fields if present
+        try {
+          const oldRef = doc(db, "subjectList", oldId);
+          const oldSnap = await getDoc(oldRef);
+          if (oldSnap.exists()) {
+            const oldData = oldSnap.data();
+            const studentFields = ["studentList", "students", "studentIds", "studentsList", "students_list"];
+            for (const k of studentFields) {
+              if (Array.isArray(oldData[k]) && oldData[k].length > 0) {
+                if (Array.isArray(newDocData[k]) && newDocData[k].length > 0) {
+                  const merged = Array.from(new Set([...(newDocData[k] || []), ...oldData[k]]));
+                  newDocData[k] = merged;
+                } else {
+                  newDocData[k] = oldData[k];
+                }
+                break;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to read old subject doc for field-based student-list migration:", err);
+        }
+
+        // create new subject doc (merge in migrated inline list if any)
+        await setDoc(doc(db, "subjectList", newCode), newDocData, { merge: true });
+
+        // migrate student subcollections
+        try {
+          const subcollectionsToTry = ["studentList", "students"];
+          for (const subName of subcollectionsToTry) {
+            const oldColRef = collection(db, "subjectList", oldId, subName);
+            const studentsSnap = await getDocs(oldColRef);
+            if (studentsSnap.empty) continue;
+
+            const docs = studentsSnap.docs;
+            const chunkSize = 500;
+            for (let i = 0; i < docs.length; i += chunkSize) {
+              const batch = writeBatch(db);
+              const chunk = docs.slice(i, i + chunkSize);
+              chunk.forEach((sd) => {
+                const data = sd.data();
+                const newDocRef = doc(db, "subjectList", newCode, subName, sd.id);
+                const oldDocRef = doc(db, "subjectList", oldId, subName, sd.id);
+                batch.set(newDocRef, data);
+                batch.delete(oldDocRef);
+              });
+              await batch.commit();
+            }
+          }
+        } catch (err) {
+          console.warn("Failed to migrate student subcollection(s):", err);
+        }
+
+        // migrate instructor references (replace oldId with newCode)
+        try {
+          const instructorsSnap = await getDocs(collection(db, "instructors"));
+          const updates = [];
+          instructorsSnap.forEach((instDoc) => {
+            const inst = instDoc.data();
+            const subjectList = Array.isArray(inst.subjectList) ? inst.subjectList : [];
+            if (subjectList.includes(oldId)) {
+              const updated = subjectList.map((sid) => (sid === oldId ? newCode : sid));
+              updates.push(updateDoc(doc(db, "instructors", instDoc.id), { subjectList: updated }));
+            }
+          });
+          await Promise.all(updates);
+        } catch (err) {
+          console.warn("Failed to migrate instructor references:", err);
+        }
+
+        // delete old subject doc
+        try {
+          await deleteDoc(doc(db, "subjectList", oldId));
+        } catch (err) {
+          console.warn("Failed to delete old subject doc:", err);
+        }
+
+        setIsSubjectOpen(false);
+        setEditingData(null);
+        return;
+      }
+
+      // create new subject (not editing)
+      const subjectID = data.subjectCode;
+      await setDoc(doc(db, "subjectList", subjectID), data, { merge: true });
+      setIsSubjectOpen(false);
+      setEditingData(null);
+    } catch (err) {
+      console.error("handleSubjectSubmit error:", err);
+      alert("Failed to save subject. See console for details.");
+    }
+  };
+
+  // called when user confirms change in ConfirmModal
+  const performCodeChange = async () => {
+    if (!pendingChangeData || !pendingOldId) {
+      setConfirmChangeVisible(false);
+      setPendingChangeData(null);
+      setPendingOldId(null);
+      return;
+    }
+
+    const newCode = pendingChangeData.subjectCode;
+    const oldId = pendingOldId;
+
+    try {
+      // reuse migration logic from handleSubjectSubmit (field copy + subcollection batches + instructor refs)
+      let newDocData = { ...pendingChangeData };
+
+      try {
+        const oldRef = doc(db, "subjectList", oldId);
+        const oldSnap = await getDoc(oldRef);
+        if (oldSnap.exists()) {
+          const oldData = oldSnap.data();
+          const studentFields = ["studentList", "students", "studentIds", "studentsList", "students_list"];
+          for (const k of studentFields) {
+            if (Array.isArray(oldData[k]) && oldData[k].length > 0) {
+              if (Array.isArray(newDocData[k]) && newDocData[k].length > 0) {
+                const merged = Array.from(new Set([...(newDocData[k] || []), ...oldData[k]]));
+                newDocData[k] = merged;
+              } else {
+                newDocData[k] = oldData[k];
+              }
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to read old subject doc for field-based student-list migration:", err);
+      }
+
+      await setDoc(doc(db, "subjectList", newCode), newDocData, { merge: true });
+
+      // migrate student subcollections
+      try {
+        const subcollectionsToTry = ["studentList", "students"];
+        for (const subName of subcollectionsToTry) {
+          const oldColRef = collection(db, "subjectList", oldId, subName);
+          const studentsSnap = await getDocs(oldColRef);
+          if (studentsSnap.empty) continue;
+
+          const docs = studentsSnap.docs;
+          const chunkSize = 500;
+          for (let i = 0; i < docs.length; i += chunkSize) {
+            const batch = writeBatch(db);
+            const chunk = docs.slice(i, i + chunkSize);
+            chunk.forEach((sd) => {
+              const data = sd.data();
+              const newDocRef = doc(db, "subjectList", newCode, subName, sd.id);
+              const oldDocRef = doc(db, "subjectList", oldId, subName, sd.id);
+              batch.set(newDocRef, data);
+              batch.delete(oldDocRef);
+            });
+            await batch.commit();
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to migrate student subcollection(s):", err);
+      }
+
+      // migrate instructor references
+      try {
+        const instructorsSnap = await getDocs(collection(db, "instructors"));
+        const updates = [];
+        instructorsSnap.forEach((instDoc) => {
+          const inst = instDoc.data();
+          const subjectList = Array.isArray(inst.subjectList) ? inst.subjectList : [];
+          if (subjectList.includes(oldId)) {
+            const updated = subjectList.map((sid) => (sid === oldId ? newCode : sid));
+            updates.push(updateDoc(doc(db, "instructors", instDoc.id), { subjectList: updated }));
+          }
+        });
+        await Promise.all(updates);
+      } catch (err) {
+        console.warn("Failed to migrate instructor references:", err);
+      }
+
+      // delete old subject doc
+      try {
+        await deleteDoc(doc(db, "subjectList", oldId));
+      } catch (err) {
+        console.warn("Failed to delete old subject doc:", err);
+      }
+
+      setIsSubjectOpen(false);
+      setEditingData(null);
+    } catch (err) {
+      console.error("performCodeChange error:", err);
+      alert("Failed to change subject code. See console.");
+    } finally {
+      setConfirmChangeVisible(false);
+      setPendingChangeData(null);
+      setPendingOldId(null);
+    }
+  };
+
+  const cancelCodeChange = () => {
+    setConfirmChangeVisible(false);
+    setPendingChangeData(null);
+    setPendingOldId(null);
   };
 
   const handleEdit = (index) => {
@@ -258,7 +508,7 @@ const SubjectManagement = () => {
 
             {/* 🔹 Action buttons */}
             <div className="flex gap-3">
-              {user?.role === "admin" && (
+              {(user?.role === "admin" || user?.role === "registrar") && (
                 <>
                   <button
                     onClick={handleOpenSubject}
@@ -380,6 +630,26 @@ const SubjectManagement = () => {
             message="Are you sure you want to delete this subject? No students will be erased from the masterlist, but all other related subject data will be deleted."
             onConfirm={handleConfirmDelete}
             onCancel={handleCancelDelete}
+          />
+
+          {/* Confirm modal for subject-code-change */}
+          <ConfirmModal
+            visible={confirmChangeVisible}
+            title="Change Subject Code?"
+            message={
+              <div>
+                <div>This will create a new subject record with the new code and remove the old record.</div>
+                <div className="mt-2 text-sm">Instructors' references will be updated and student subcollections will be migrated, but some related data may not be migrated automatically.</div>
+                <div className="mt-2 font-medium">New Code: {pendingChangeData?.subjectCode}</div>
+                <div>Old Code: {pendingOldId}</div>
+              </div>
+            }
+            onConfirm={performCodeChange}
+            onCancel={cancelCodeChange}
+            confirmLabel="Proceed"
+            cancelLabel="Cancel"
+            confirmClass="bg-red-600 text-white hover:bg-red-700"
+            cancelClass="bg-gray-200 hover:bg-gray-300"
           />
         </div>
       </div>
