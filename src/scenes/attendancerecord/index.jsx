@@ -7,10 +7,36 @@ import { collection, getDocs, doc } from "firebase/firestore";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
+const getWeekDates = () => {
+  const now = new Date();
+  const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
+
+  // Calculate the start of week (Sunday)
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - dayOfWeek);
+
+  // Calculate the end of week (Saturday)
+  const endDate = new Date(now);
+  endDate.setDate(now.getDate() + (6 - dayOfWeek));
+
+  // Format dates as YYYY-MM-DD
+  const formatDate = (date) => {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
+      date.getDate()
+    ).padStart(2, "0")}`;
+  };
+
+  return {
+    start: formatDate(startDate),
+    end: formatDate(endDate),
+  };
+};
+
 const AttendanceRecord = () => {
-  const getToday = () => new Date().toISOString().split("T")[0];
-  const [startDate, setStartDate] = useState(getToday());
-  const [endDate, setEndDate] = useState(getToday());
+  // Replace the existing date state initialization
+  const weekDates = getWeekDates();
+  const [startDate, setStartDate] = useState(weekDates.start);
+  const [endDate, setEndDate] = useState(weekDates.end);
   const [searchTerm, setSearchTerm] = useState("");
   const [attendanceRows, setAttendanceRows] = useState([]);
   const [subjectList, setSubjectList] = useState([]);
@@ -464,22 +490,19 @@ const AttendanceRecord = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {paginatedRows.map((row, index) => {
-                    const remarkColor = getRemarkTextColor(row.remark);
-                    return (
-                      <tr key={index} className="border-t hover:bg-gray-50">
-                        <td className="border px-4 py-2">{row.date}</td>
-                        <td className="border px-4 py-2">{row.studentId}</td>
-                        <td className="border px-4 py-2">{row.studentName}</td>
-                        <td className="border px-4 py-2">{row.subject}</td>
-                        <td className="border px-4 py-2">{row.yearLevel}</td>
-                        <td className="border px-4 py-2">{row.timeIn}</td>
-                        <td className={`border px-4 py-2 font-medium ${remarkColor}`}>
-                          {row.remark}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {paginatedRows.map((row, index) => (
+                    <tr key={index} className="border-t hover:bg-gray-50">
+                      <td className="border px-4 py-2">{row.date}</td>
+                      <td className="border px-4 py-2">{row.studentId}</td>
+                      <td className="border px-4 py-2">{row.studentName}</td>
+                      <td className="border px-4 py-2">{row.subject}</td>
+                      <td className="border px-4 py-2">{row.yearLevel}</td>
+                      <td className="border px-4 py-2">{row.timeIn}</td>
+                      <td className={`border px-4 py-2 font-medium ${getRemarkTextColor(row.remark)}`}>
+                        {row.remark}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -502,21 +525,18 @@ const AttendanceRecord = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {groupedRows[subject].map((row, index) => {
-                        const remarkColor = getRemarkTextColor(row.remark);
-                        return (
-                          <tr key={index} className="border-t hover:bg-gray-50">
-                            <td className="border px-4 py-2">{row.date}</td>
-                            <td className="border px-4 py-2">{row.studentId}</td>
-                            <td className="border px-4 py-2">{row.studentName}</td>
-                            <td className="border px-4 py-2">{row.yearLevel}</td>
-                            <td className="border px-4 py-2">{row.timeIn}</td>
-                            <td className={`border px-4 py-2 font-medium ${remarkColor}`}>
-                              {row.remark}
-                            </td>
-                          </tr>
-                        );
-                      })}
+                      {groupedRows[subject].map((row, idx) => (
+                        <tr key={idx} className="border-t hover:bg-gray-50">
+                          <td className="border px-4 py-2">{row.date}</td>
+                          <td className="border px-4 py-2">{row.studentId}</td>
+                          <td className="border px-4 py-2">{row.studentName}</td>
+                          <td className="border px-4 py-2">{row.yearLevel}</td>
+                          <td className="border px-4 py-2">{row.timeIn}</td>
+                          <td className={`border px-4 py-2 font-medium ${getRemarkTextColor(row.remark)}`}>
+                            {row.remark}
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>

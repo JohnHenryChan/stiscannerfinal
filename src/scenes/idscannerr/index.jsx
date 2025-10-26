@@ -30,6 +30,9 @@ const IDScanner = () => {
   const [showStudentCard, setShowStudentCard] = useState(null);
   const [allStudents, setAllStudents] = useState([]);
   const [allSubjects, setAllSubjects] = useState([]);
+  
+  // New state for initialization
+  const [initializing, setInitializing] = useState(true); // Add this line
 
   // readiness states (new)
   const [dataLoaded, setDataLoaded] = useState(false);
@@ -188,11 +191,13 @@ const IDScanner = () => {
 
         // MARK DATA AS LOADED -> enables scanner when models also loaded
         setDataLoaded(true);
+        setInitializing(false); // Set initializing to false when data is loaded
         console.log("[Startup] dataLoaded = true");
       } catch (err) {
         console.error("Startup data load failed:", err);
         setError("Failed to load initial data.");
         setDataLoaded(false);
+        setInitializing(false); // Ensure it also hides on error
       }
     };
 
@@ -434,6 +439,9 @@ const IDScanner = () => {
         sub.studentIds?.includes(studentData.id)
       );
 
+      console.log("[RFID] availableSubjects:", availableSubjects);
+      // Shows full subject objects, but when we map to buttons we need to ensure subject names exist
+
       // fixed syntax (removed extra ')') and added mapping log
       console.log("[RFID] subjects matched for student:", availableSubjects.map(s => ({ id: s.id, subject: s.subject || s.name, subjectCode: s.subjectCode })));
 
@@ -448,7 +456,7 @@ const IDScanner = () => {
         subjectRef.current = null; // require user selection
         setPendingStudent(studentData);
         pendingStudentRef.current = studentData; // <-- sync ref
-        setSubjectModalOpen(true);
+        setSubjectModalOpen(true); // Open subject modal
       } else {
         const subject = availableSubjects[0];
         studentData._subjectName = subject.subject;
@@ -457,9 +465,12 @@ const IDScanner = () => {
         pendingStudentRef.current = studentData; // <-- sync ref
         setSubjectChoices([subject]);
         subjectRef.current = subject; // <-- set selected subject synchronously
-        setFaceModalOpen(true);
-        setFaceLastActivity(Date.now());
-        await startFaceStream(studentData);
+        // Only open face modal if subject modal is not open
+        if (!subjectModalOpen) {
+            setFaceModalOpen(true);
+            setFaceLastActivity(Date.now());
+            await startFaceStream(studentData);
+        }
       }
 
       setIsScanning(false);
@@ -763,48 +774,48 @@ const IDScanner = () => {
   // CENTRALIZED cleanup helper for verification/modal lifecycle
   // stopStream: if true, actually stop media tracks; if false, detach visible video but keep preloaded stream running
   const cleanupVerificationResources = useCallback((opts = { stopStream: false }) => {
-    // clear verification interval
+    // Clear all intervals first
     if (loopIntervalRef.current) {
-      try { clearInterval(loopIntervalRef.current); } catch (e) {}
-      loopIntervalRef.current = null;
+        clearInterval(loopIntervalRef.current);
+        loopIntervalRef.current = null;
     }
-
-    // clear cooldown interval
     if (cdIntervalRef.current) {
-      try { clearInterval(cdIntervalRef.current); } catch (e) {}
-      cdIntervalRef.current = null;
+        clearInterval(cdIntervalRef.current);
+        cdIntervalRef.current = null;
     }
 
-    // stop rendering to canvas and detach visible video (but keep preloaded stream if requested)
-    try { stopRenderLoop(); } catch (e) {}
+    // Stop render loop and detection
+    stopRenderLoop();
     detectingRef.current = false;
 
-    try {
-      if (videoRef.current) {
-        try { videoRef.current.pause(); } catch (e) {}
-        try { videoRef.current.srcObject = null; } catch (e) {}
-      }
-    } catch (e) { console.warn("cleanup: detach visible video failed", e); }
-
-    // clear reference descriptor so next scan loads fresh descriptor
-    refDescriptorRef.current = null;
-
-    // reset attempt/status UI immediately
+    // Reset all state variables
     setFaceAttempts(0);
     faceAttemptsRef.current = 0;
     setLastAttemptStatus(null);
+    setCooldown(0);
     setCameraLoading(false);
 
-    // clear pending selections
+    // Clear video elements
+    if (videoRef.current) {
+        try {
+            videoRef.current.pause();
+            videoRef.current.srcObject = null;
+        } catch (e) {
+            console.warn("Failed to cleanup video element:", e);
+        }
+    }
+
+    // Clear pending data
     setPendingStudent(null);
     pendingStudentRef.current = null;
     subjectRef.current = null;
+    refDescriptorRef.current = null;
 
-    // optionally stop actual media tracks (used for full teardown)
+    // If full cleanup requested, stop the stream
     if (opts.stopStream) {
-      try { stopFaceStream(); } catch (e) { console.warn("cleanup: stopFaceStream failed", e); }
+        stopFaceStream();
     }
-  }, [stopFaceStream, stopRenderLoop]);
+}, [stopFaceStream, stopRenderLoop]);
 
   useEffect(() => {
     return () => {
@@ -902,11 +913,9 @@ const IDScanner = () => {
             // animate modal close then cleanup resources (do NOT stop preloaded stream here)
             setFaceClosing(true);
             setTimeout(() => {
+              cleanupVerificationResources({ stopStream: false });
               setFaceModalOpen(false);
               setFaceClosing(false);
-
-              // cleanup verification resources but keep preloaded stream alive
-              cleanupVerificationResources({ stopStream: false });
             }, 300);
             return;
           } else if (refDescriptorRef.current) {
@@ -959,14 +968,14 @@ const IDScanner = () => {
               });
 
               setError("Face verification failed (max attempts).");
-              setFaceModalOpen(false);
-              stopFaceStream();
-              setFaceAttempts(0);
-              faceAttemptsRef.current = 0;
-              refDescriptorRef.current = null;
-              setPendingStudent(null);
-              pendingStudentRef.current = null;
-              detectingRef.current = false;
+              setFaceClosing(true);
+              
+              setTimeout(() => {
+                cleanupVerificationResources({ stopStream: true });
+                setFaceModalOpen(false);
+                setFaceClosing(false);
+              }, 300);
+              
               return;
             }
           }
@@ -999,6 +1008,16 @@ const IDScanner = () => {
 
   return (
     <div className="flex flex-col items-center justify-start min-h-screen bg-gradient-to-b from-gray-200 to-gray-100 relative">
+      {/* Initialization Modal */}
+      {initializing && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="bg-white p-6 rounded-xl shadow-2xl text-center">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Initializing...</h2>
+            <p className="text-gray-600">Please wait while the system is loading.</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header
         className="w-full py-4 shadow-md text-center text-xl font-semibold flex items-center justify-between px-4"
@@ -1068,42 +1087,43 @@ const IDScanner = () => {
 
       {/* Subject Modal */}
       {subjectModalOpen && (
-        <div
-          className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${
-            subjectClosing ? "opacity-0" : "opacity-100"
-          }`}
-        >
-          <div
-            className={`bg-white p-6 rounded-xl shadow-2xl w-96 text-center transform transition-all duration-300 ${
-              subjectClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"
-            }`}
-          >
-            <h2 className="text-xl font-bold text-gray-800 mb-4">Select Subject</h2>
-            <div className="flex flex-col space-y-2">
-              {subjectChoices.map((subj) => (
-                <button
-                  key={subj.id}
-                  onClick={async () => {
-                    const student = { ...(pendingStudentRef.current || pendingStudent) };
-                    student._subjectName = subj.subject;
-                    student._subjectStartTime = subj.startTime;
-                    student._subjectCode = subj.subjectCode;
-                    setPendingStudent(student);
-                    pendingStudentRef.current = student;
-                    setSubjectChoices([subj]);
-                    subjectRef.current = subj;
-                    setSubjectModalOpen(false);
-                    setFaceModalOpen(true);
-                    setFaceLastActivity(Date.now());
-                    await startFaceStream(student);
-                  }}
-                  className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md"
-                >
-                  {subj.subject || subj.name || subj.id}
-                </button>
-              ))}
+        <div className={`absolute inset-0 flex items-center justify-center bg-black bg-opacity-40 transition-opacity duration-300 ${subjectClosing ? "opacity-0" : "opacity-100"}`}>
+            <div className={`bg-white p-6 rounded-xl shadow-2xl w-96 text-center transform transition-all duration-300 ${subjectClosing ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"}`}>
+                <h2 className="text-xl font-bold text-gray-800 mb-4">Select Subject</h2>
+                <div className="flex flex-col space-y-2">
+                    {subjectChoices.map((subj) => {
+                    // Debug log to check what data is available
+                    console.log("Rendering subject button:", subj);
+                    
+                    // Get subject name from any available field
+                    const subjectName = subj.subject || subj.name || subj.subjectName || subj.id || "Unknown Subject";
+                    
+                    return (
+                        <button
+                            key={subj.id}
+                            onClick={async () => {
+                                const student = { ...(pendingStudentRef.current || pendingStudent) };
+                                student._subjectName = subjectName;
+                                student._subjectStartTime = subj.startTime;
+                                student._subjectCode = subj.id;
+                                setPendingStudent(student);
+                                pendingStudentRef.current = student;
+                                setSubjectChoices([subj]);
+                                subjectRef.current = subj;
+                                setSubjectModalOpen(false);
+                                setFaceModalOpen(true);
+                                setFaceLastActivity(Date.now());
+                                await startFaceStream(student);
+                            }}
+                            className="w-full bg-blue-500 hover:bg-blue-600 text-white px-4 py-3 rounded-lg shadow-md text-lg flex flex-col items-center justify-center"
+                        >
+                            <div className="font-bold text-black">{subjectName}</div>
+                            <div className="text-sm text-black opacity-90">{subj.id}</div>
+                        </button>
+                    );
+                })}
+                </div>
             </div>
-          </div>
         </div>
       )}
 
