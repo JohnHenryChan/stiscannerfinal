@@ -3,33 +3,46 @@ import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import { MdSearch } from "react-icons/md";
 import { db } from "../../firebaseConfig";
-import { collection, getDocs, doc } from "firebase/firestore";
+import { collection, getDocs, doc, getDoc, setDoc } from "firebase/firestore";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { utils as XLSXUtils, writeFile as XLSXWrite } from 'xlsx';
 
+// dry-run: when true only logs planned writes (no writes to attendance/config)
+const WRITE_ABSENCE_DRY_RUN = false;
+
+// helper: format local YYYY-MM-DD
+const formatDateLocal = (d) => {
+  const date = d instanceof Date ? d : new Date(d);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+};
+
+// helper: inclusive date iterator
+const iterateDatesInclusive = (startDate, endDate) => {
+  const out = [];
+  const cur = new Date(startDate);
+  cur.setHours(0,0,0,0);
+  const end = new Date(endDate);
+  end.setHours(0,0,0,0);
+  while (cur <= end) {
+    out.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out; // <-- ensure function returns the array
+};
+
+// helper: return start/end of current week (YYYY-MM-DD)
 const getWeekDates = () => {
   const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
-
-  // Calculate the start of week (Sunday)
-  const startDate = new Date(now);
-  startDate.setDate(now.getDate() - dayOfWeek);
-
-  // Calculate the end of week (Saturday)
-  const endDate = new Date(now);
-  endDate.setDate(now.getDate() + (6 - dayOfWeek));
-
-  // Format dates as YYYY-MM-DD
-  const formatDate = (date) => {
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-      date.getDate()
-    ).padStart(2, "0")}`;
-  };
-
-  return {
-    start: formatDate(startDate),
-    end: formatDate(endDate),
-  };
+  const dayOfWeek = now.getDay(); // 0 = Sunday
+  const start = new Date(now);
+  start.setDate(now.getDate() - dayOfWeek);
+  start.setHours(0,0,0,0);
+  const end = new Date(now);
+  end.setDate(now.getDate() + (6 - dayOfWeek));
+  end.setHours(23,59,59,999);
+  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return { start: fmt(start), end: fmt(end) };
 };
 
 const AttendanceRecord = () => {
@@ -39,7 +52,9 @@ const AttendanceRecord = () => {
   const [endDate, setEndDate] = useState(weekDates.end);
   const [searchTerm, setSearchTerm] = useState("");
   const [attendanceRows, setAttendanceRows] = useState([]);
+  // (if allStudents/subjectList are already state elsewhere you can remove local caching below)
   const [subjectList, setSubjectList] = useState([]);
+  const [allStudents, setAllStudents] = useState([]);
   const [selectedSubjects, setSelectedSubjects] = useState([]);
   const [selectedRemarks, setSelectedRemarks] = useState([]);
   const [selectedYears, setSelectedYears] = useState([]);
@@ -82,6 +97,20 @@ const AttendanceRecord = () => {
     };
     fetchSubjects();
   }, []);
+
+  // Sort function
+  const sortAttendanceByDateAndAbsence = (records) => {
+    return [...records].sort((a, b) => {
+      // Absences always go to bottom
+      if (a.remark === "Absent" && b.remark !== "Absent") return 1;
+      if (a.remark !== "Absent" && b.remark === "Absent") return -1;
+      
+      // Compare date+time for non-absences
+      const dateTimeA = new Date(`${a.date} ${a.timeIn || '00:00'}`).getTime();
+      const dateTimeB = new Date(`${b.date} ${b.timeIn || '00:00'}`).getTime();
+      return dateTimeB - dateTimeA; // newest first
+    });
+  };
 
   // Fetch attendance
   useEffect(() => {
@@ -138,7 +167,9 @@ const AttendanceRecord = () => {
         })
       );
 
-      setAttendanceRows(allRecords);
+      // Sort immediately after fetching
+      const sortedRecords = sortAttendanceByDateAndAbsence(allRecords);
+      setAttendanceRows(sortedRecords);
     };
     fetchAttendance();
   }, [startDate, endDate, subjectList]);
@@ -272,6 +303,57 @@ const AttendanceRecord = () => {
     a.click();
   };
 
+  // Export to Excel
+  const exportToExcel = () => {
+    // Use currently displayed rows (maintains current sort/filter state)
+    const rows = groupedView 
+      ? Object.values(groupedRows).flat() 
+      : filteredRows || attendanceRows || [];
+
+    if (!rows?.length) return;
+
+    // Column definitions with widths
+    const columns = [
+      { key: "date", label: "Date", width: 12 },
+      { key: "studentId", label: "Student ID", width: 15 },
+      { key: "studentName", label: "Student Name", width: 30 },
+      { key: "subject", label: "Subject", width: 40 },
+      { key: "yearLevel", label: "Year Level", width: 12 },
+      { key: "timeIn", label: "Time In", width: 12 },
+      { key: "remark", label: "Remarks", width: 15 }
+    ];
+
+    // Format data for Excel
+    const excelData = rows.map(row => ({
+      "Date": row.date || '',
+      "Student ID": row.studentId || '',
+      "Student Name": row.studentName || '',
+      "Subject": row.subject || '',
+      "Year Level": row.yearLevel || '',
+      "Time In": row.timeIn || '',
+      "Remarks": row.remark || ''
+    }));
+
+    // Create workbook
+    const wb = XLSXUtils.book_new();
+    const ws = XLSXUtils.json_to_sheet(excelData);
+
+    // Set column widths
+    ws['!cols'] = columns.map(col => ({ wch: col.width }));
+
+    // Add worksheet to workbook
+    XLSXUtils.book_append_sheet(wb, ws, "Attendance");
+
+    // Generate filename with date range
+    const dateStr = startDate && endDate 
+      ? `${startDate}_to_${endDate}` 
+      : new Date().toISOString().slice(0,10);
+    const filename = `attendance_${dateStr}.xlsx`;
+
+    // Export file
+    XLSXWrite(wb, filename);
+  };
+
   // options for the dropdown: ensure unique subject names from every subjectCode document
   const subjectOptions = Array.from(
     new Set(subjectList.map((s) => (s && s.subject ? s.subject : s.id)))
@@ -310,6 +392,184 @@ const AttendanceRecord = () => {
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
+
+  // on-mount check for writeAbsence and plan/perform absent writes (dry-run by default)
+  useEffect(() => {
+    const checkWriteAbsence = async () => {
+      try {
+        console.log("[writeAbsence] starting mount check...");
+
+        // fetch config doc
+        const cfgRef = doc(db, "system", "attendance");
+        let cfgSnap = null;
+        try {
+          cfgSnap = await getDoc(cfgRef);
+        } catch (err) {
+          console.warn("[writeAbsence] failed reading config doc:", err);
+        }
+        const rawVal = cfgSnap?.exists() ? cfgSnap.data()?.writeAbsence : null;
+        console.log("[writeAbsence] config raw value:", rawVal);
+
+        const parseStoredDate = (v) => {
+          if (!v) return null;
+          if (typeof v === "object" && typeof v.toDate === "function") return v.toDate();
+          const parsed = new Date(String(v));
+          return isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const storedDate = parseStoredDate(rawVal);
+        const today = new Date();
+        const todayStr = formatDateLocal(today);
+
+        // fetch subjectList & students caches (if not already loaded in state)
+        try {
+          const sSnap = await getDocs(collection(db, "subjectList"));
+          const subjects = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setSubjectList(subjects);
+          console.log("[writeAbsence] loaded subjectList count:", subjects.length);
+        } catch (err) {
+          console.error("[writeAbsence] failed to fetch subjectList:", err);
+        }
+
+        try {
+          const studSnap = await getDocs(collection(db, "students"));
+          const students = studSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setAllStudents(students);
+          console.log("[writeAbsence] loaded students count:", students.length);
+        } catch (err) {
+          console.error("[writeAbsence] failed to fetch students:", err);
+        }
+
+        if (!storedDate) {
+          console.log("[writeAbsence] no writeAbsence value or invalid -> will set to today:", todayStr);
+          console.log("[writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no write performed)" : "UPDATING CONFIG");
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+            console.log("[writeAbsence] config updated to today:", todayStr);
+          }
+          return;
+        }
+
+        const storedStr = formatDateLocal(storedDate);
+        console.log("[writeAbsence] parsed stored date:", storedStr, "today:", todayStr);
+
+        if (storedStr === todayStr) {
+          console.log("[writeAbsence] stored date equals today -> nothing to do");
+          return;
+        }
+
+        // if stored date in future -> reset to today
+        if (storedDate > new Date(formatDateLocal(today))) {
+          console.log("[writeAbsence] stored date is in the future -> resetting to today");
+          console.log("[writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (would update config)" : "UPDATING CONFIG");
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+            console.log("[writeAbsence] config updated to today:", todayStr);
+          }
+          return;
+        }
+
+        // stored date is before today -> process missing dates and write Absent logs
+        console.log("[writeAbsence] stored date is before today -> processing range", storedStr, "to", todayStr);
+
+        // do NOT include the current date when generating absence logs
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
+        yesterday.setHours(0,0,0,0);
+
+        if (storedDate > yesterday) {
+          console.log("[writeAbsence] no past dates to process (storedDate is today or later) -> nothing to do");
+          // optionally update config to today to avoid repeated checks; keeping as log per current behavior
+          return;
+        }
+
+        const datesToProcess = iterateDatesInclusive(storedDate, yesterday);
+
+        // local snapshot of subjects and students to operate on
+        const subjects = subjectList.length ? subjectList : (await getDocs(collection(db, "subjectList"))).docs.map(d=>({id:d.id,...d.data()}));
+        const studentsCache = allStudents.length ? allStudents : (await getDocs(collection(db, "students"))).docs.map(d=>({id:d.id,...d.data()}));
+
+        for (const dateObj of datesToProcess) {
+          const dateStr = formatDateLocal(dateObj);
+          const weekday = dateObj.toLocaleDateString("en-US", { weekday: "short" });
+          console.log(`[writeAbsence] processing date ${dateStr} (weekday ${weekday})`);
+
+          // subjects active that weekday
+          const subjectsForDate = subjects.filter(s => s.active !== false && Array.isArray(s.days) && s.days.includes(weekday));
+          console.log(`[writeAbsence] subjects active on ${dateStr}:`, subjectsForDate.map(s => ({ id: s.id, subject: s.subject || s.name })));
+
+          for (const subj of subjectsForDate) {
+            const subjectId = subj.id;
+            const subjectName = subj.subject || subj.name || subjectId;
+
+            // determine enrolled students (support studentIds array or subcollection)
+            let enrolledIds = Array.isArray(subj.studentIds) ? subj.studentIds.slice() : [];
+            if ((!enrolledIds || enrolledIds.length === 0)) {
+              try {
+                const studentsCol = collection(db, "subjectList", subjectId, "students");
+                const sSnap = await getDocs(studentsCol);
+                if (!sSnap.empty) enrolledIds = sSnap.docs.map(d => d.id);
+              } catch (err) {
+                console.warn("[writeAbsence] failed to fetch enrolled students subcollection for", subjectId, err);
+              }
+            }
+
+            console.log(`[writeAbsence] subject ${subjectId} (${subjectName}) has ${enrolledIds.length} enrolled students`);
+
+            for (const studentId of enrolledIds) {
+              try {
+                const attRef = doc(db, "attendance", dateStr, subjectId, studentId);
+                const attSnap = await getDoc(attRef);
+                if (attSnap.exists()) {
+                  console.log(`[writeAbsence] attendance already exists - skipping: attendance/${dateStr}/${subjectId}/${studentId}`, attSnap.data());
+                  continue;
+                }
+
+                // build payload similar to IDScanner writes but without time/timestamp
+                const studentData = studentsCache.find(s => s.id === studentId) || {};
+                const payload = {
+                  subjectId,
+                  subjectName,
+                  studentId,
+                  name: studentData.name || `${studentData.firstName || ""} ${studentData.lastName || ""}`.trim() || null,
+                  rfid: studentData.rfid || null,
+                  year: studentData.year || studentData.yearLevel || null,
+                  date: dateStr,
+                  remark: "Absent"
+                  // intentionally leaving out time and timestamp per request
+                };
+
+                console.log("[writeAbsence] WILL WRITE absent document (or log):", {
+                  path: `attendance/${dateStr}/${subjectId}/${studentId}`,
+                  payload,
+                  dryRun: WRITE_ABSENCE_DRY_RUN
+                });
+
+                if (!WRITE_ABSENCE_DRY_RUN) {
+                  await setDoc(attRef, payload);
+                  console.log("[writeAbsence] wrote absent doc:", `attendance/${dateStr}/${subjectId}/${studentId}`);
+                }
+              } catch (err) {
+                console.error("[writeAbsence] error checking/writing attendance for", { dateStr, subjectId, studentId }, err);
+              }
+            } // end students loop
+          } // end subj loop
+        } // end dates loop
+
+        console.log("[writeAbsence] processing complete. would update config to today:", todayStr, "action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no update performed)" : "UPDATING CONFIG");
+        if (!WRITE_ABSENCE_DRY_RUN) {
+          await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+          console.log("[writeAbsence] config updated to today:", todayStr);
+        }
+      } catch (err) {
+        console.error("[writeAbsence] unexpected error:", err);
+      }
+    };
+
+    // run check on mount (async)
+    checkWriteAbsence();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-100">
@@ -471,6 +731,12 @@ const AttendanceRecord = () => {
               className="px-3 py-1 bg-purple-600 text-white rounded"
             >
               Export XML
+            </button>
+            <button
+              onClick={exportToExcel}
+              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg shadow-md"
+            >
+              Export Excel
             </button>
           </div>
 

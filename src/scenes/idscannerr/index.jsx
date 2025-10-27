@@ -329,37 +329,101 @@ const IDScanner = () => {
   };
 
   const logAttendance = async (subjectId, studentId, studentData) => {
-    const today = new Date().toISOString().split("T")[0];
-    const dayRef = doc(db, "attendance", today);
-    const attendanceCol = collection(db, "attendance", today, subjectId);
+    // helper: format any Date / Firestore Timestamp to local YYYY-MM-DD
+    const formatLocalYMD = (d) => {
+      const dateObj = d && typeof d.toDate === "function" ? d.toDate() : new Date(d);
+      return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, "0")}-${String(dateObj.getDate()).padStart(2, "0")}`;
+    };
+
+    const todayLocalStr = formatLocalYMD(new Date());
+    const now = new Date();
+    const isoNow = now.toISOString();
+    const localNow = now.toString();
+
+    const dayRefPath = `attendance/${todayLocalStr}`;
+    const attendanceDocPath = `attendance/${todayLocalStr}/${subjectId}/${studentId}`;
+
+    console.log("[logAttendance] attempt", {
+      subjectId,
+      studentId,
+      studentPreview: {
+        id: studentData?.id,
+        name: studentData?.name || `${studentData?.firstName || ""} ${studentData?.lastName || ""}`.trim(),
+        rfid: studentData?.rfid,
+        _subjectName: studentData?._subjectName,
+        _subjectStartTime: studentData?._subjectStartTime,
+      },
+      computedPaths: { dayDoc: dayRefPath, attendanceDoc: attendanceDocPath },
+      localNow,
+      isoNow,
+      todayLocalStr,
+    });
+
+    const dayRef = doc(db, "attendance", todayLocalStr);
+    const attendanceCol = collection(db, "attendance", todayLocalStr, subjectId);
     const attendanceDocRef = doc(attendanceCol, studentId);
 
-    const existing = await getDoc(attendanceDocRef);
-    if (existing.exists()) return false;
+    try {
+      const existing = await getDoc(attendanceDocRef);
+      if (existing.exists()) {
+        const existingData = existing.data() || {};
+        // prefer explicit date string field, fallback to timestamp fields
+        let existingDateStr = null;
 
-    await setDoc(dayRef, { Date: today }, { merge: true });
+        if (existingData.date && typeof existingData.date === "string") {
+          existingDateStr = existingData.date;
+        } else if (existingData.date && typeof existingData.date.toDate === "function") {
+          existingDateStr = formatLocalYMD(existingData.date);
+        } else if (existingData.timestamp) {
+          existingDateStr = formatLocalYMD(existingData.timestamp);
+        } else if (existingData.time && typeof existingData.time === "string") {
+          // last-resort heuristic: no reliable date field; log and treat as different
+          existingDateStr = null;
+        }
 
-    const now = new Date();
-    const [startHour, startMin] = (studentData._subjectStartTime || "00:00")
-      .split(":")
-      .map(Number);
-    const startTime = new Date();
-    startTime.setHours(startHour, startMin + 15, 0, 0);
-    const remark = now > startTime ? "Late" : "Present";
+        console.warn("[logAttendance] existing attendance doc found", {
+          path: attendanceDocPath,
+          existingData,
+          existingDateStr,
+        });
 
-    await setDoc(attendanceDocRef, {
-      subjectId,
-      subjectName: studentData._subjectName || "",
-      studentId,
-      timestamp: Timestamp.now(),
-      name: `${studentData.firstName} ${studentData.lastName}`,
-      rfid: studentData.rfid,
-      year: studentData.year || studentData.yearLevel || "N/A",
-      date: today,
-      time: now.toLocaleTimeString(),
-      remark,
-    });
-    return true;
+        if (existingDateStr === todayLocalStr) {
+          console.warn("[logAttendance] existing record matches today -> skipping write");
+          return false;
+        }
+
+        console.log("[logAttendance] existing record date !== today (or missing) -> will overwrite with today's record");
+        // fall through to write (overwrites existing doc)
+      }
+
+      // ensure parent day doc exists
+      await setDoc(dayRef, { Date: todayLocalStr }, { merge: true });
+
+      const [startHour, startMin] = (studentData?._subjectStartTime || "00:00").split(":").map(Number);
+      const startTime = new Date();
+      startTime.setHours(startHour, startMin + 15, 0, 0);
+      const remark = now > startTime ? "Late" : "Present";
+
+      const payload = {
+        subjectId,
+        subjectName: studentData?._subjectName || "",
+        studentId,
+        timestamp: Timestamp.now(),
+        name: `${studentData?.firstName || ""} ${studentData?.lastName || ""}`.trim(),
+        rfid: studentData?.rfid,
+        year: studentData?.year || studentData?.yearLevel || "N/A",
+        date: todayLocalStr,
+        time: now.toLocaleTimeString(),
+        remark,
+      };
+
+      console.log("[logAttendance] writing attendance document", { path: attendanceDocPath, payload, localNow, isoNow });
+      await setDoc(attendanceDocRef, payload);
+      return true;
+    } catch (err) {
+      console.error("[logAttendance] write failed:", err);
+      throw err;
+    }
   };
 
   /** ---------------------- AUDIT LOGGING ---------------------- */

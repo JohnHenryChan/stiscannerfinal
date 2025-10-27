@@ -15,7 +15,10 @@ import {
 import {
   collection,
   getDocs,
+  doc,
+  getDoc,
   query,
+  where,
   orderBy,
   limit,
   doc as firestoreDoc,
@@ -88,6 +91,8 @@ const Dashboard = () => {
     const dayShort = getCurrentDayShort();
     const nowHHMM = getCurrentTimeHHMM();
 
+    console.log("[Dashboard] fetchToday start", { dateStr, dayShort, nowHHMM });
+
     const normalizeStatus = (raw) => {
       if (raw == null) return "Absent";
       const r = String(raw).trim().toLowerCase();
@@ -100,58 +105,60 @@ const Dashboard = () => {
 
     const fetchToday = async () => {
       try {
-        // If current user is an instructor, determine the instructor doc (to restrict subjects)
-        let instructorDoc = null;
-        if (user?.uid) {
-          try {
-            const instrQ = query(collection(db, "instructors"), where("uid", "==", user.uid));
-            const instrSnap = await getDocs(instrQ);
-            if (!instrSnap.empty) {
-              const d = instrSnap.docs[0];
-              instructorDoc = { id: d.id, ...d.data() };
-            }
-          } catch (err) {
-            console.warn("Failed to resolve instructor doc:", err);
-          }
-        }
-
-        // load all subjects and pick active ones (and owned by instructor if applicable)
+        // load all subjects and pick active ones (no role-based ownership filtering)
         const subsSnap = await getDocs(collection(db, "subjectList"));
+        console.log("[Dashboard] loaded subjectList count:", subsSnap.size);
+
         const activeSubjects = [];
         subsSnap.forEach((s) => {
-          const data = s.data() || {};
-          const days = Array.isArray(data.days) ? data.days : [];
-          const matchesDay =
-            days.includes(dayShort) ||
-            days.includes(new Date().toLocaleDateString("en-US", { weekday: "long" }));
-          const withinTime =
-            !data.startTime || !data.endTime || (data.startTime <= nowHHMM && nowHHMM <= data.endTime);
+          const raw = s.data() || {};
+          // normalize days to array of trimmed lowercase strings for reliable matching
+          const days = Array.isArray(raw.days)
+            ? raw.days.map(d => (typeof d === "string" ? d.trim().toLowerCase() : "")).filter(Boolean)
+            : [];
+          const todayShortLower = dayShort.toLowerCase();
+          const todayLongLower = new Date().toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
 
-          // ownership check: if instructorDoc exists, only include subjects the instructor owns
-          let isOwned = true;
-          if (instructorDoc) {
-            const ownerChecks = [
-              data.instructorUid,
-              data.instructor,
-              data.owner,
-              data.instructorCode,
-              s.id,
-            ];
-            // consider subject owned if any of these matches instructorDoc.uid or instructorDoc.id or instructorDoc.code
-            isOwned = ownerChecks.some((v) => {
-              if (!v) return false;
-              if (v === user.uid) return true;
-              if (v === instructorDoc.id) return true;
-              if (instructorDoc.code && v === instructorDoc.code) return true;
-              if (instructorDoc.instructorCode && v === instructorDoc.instructorCode) return true;
-              return false;
-            });
+          const matchesDay = days.includes(todayShortLower) || days.includes(todayLongLower);
+
+          // safe time checks: treat missing start/end as always within time
+          const startTime = raw.startTime ? String(raw.startTime).trim() : null;
+          const endTime = raw.endTime ? String(raw.endTime).trim() : null;
+          let withinTime = true;
+          if (startTime && endTime) {
+            try {
+              withinTime = startTime <= nowHHMM && nowHHMM <= endTime;
+            } catch (e) {
+              withinTime = true;
+            }
           }
 
-          if (data.active !== false && matchesDay && withinTime && isOwned) {
-            activeSubjects.push({ id: s.id, ...data });
+          const activeFlag = raw.active !== false;
+
+          // Debug log for each subject evaluation (no ownership checks)
+          console.log("[Dashboard] subject check", {
+            id: s.id,
+            subjectName: raw.name || raw.subject || raw.subjectName,
+            days,
+            matchesDay,
+            startTime,
+            endTime,
+            withinTime,
+            activeFlag
+          });
+
+          if (activeFlag && matchesDay && withinTime) {
+            activeSubjects.push({ id: s.id, ...raw });
+          } else {
+            const reasons = [];
+            if (!activeFlag) reasons.push("inactive");
+            if (!matchesDay) reasons.push("wrong day");
+            if (!withinTime) reasons.push("out of time range");
+            console.log(`[Dashboard] skipping subject ${s.id} (${raw.subject || raw.name || s.id})`, reasons.join(", "));
           }
         });
+
+        console.log("[Dashboard] activeSubjects count after filtering:", activeSubjects.length);
 
         const subjectsWithCounts = [];
         let allEntries = [];
@@ -205,8 +212,12 @@ const Dashboard = () => {
 
         if (!cancelled) {
           setTodaySubjects(subjectsWithCounts);
-          // only show latest 5 entries from subjects the instructor owns (activeSubjects already filtered)
+          // only show latest 5 entries
           setLatestTodayEntries(allEntries.slice(0, 5));
+          console.log("[Dashboard] set todaySubjects and latestTodayEntries", {
+            subjectCount: subjectsWithCounts.length,
+            latestCount: allEntries.slice(0, 5).length
+          });
         }
       } catch (err) {
         console.error("Failed to load today's activity:", err);
@@ -221,7 +232,7 @@ const Dashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, [user]); // re-run when auth user changes
+  }, [user]); // keep dependency to refresh when auth changes
 
   // === Chart aggregation (simple): scan attendance date docs that belong to selectedYear and aggregate by month ===
   useEffect(() => {
