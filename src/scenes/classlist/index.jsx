@@ -22,6 +22,43 @@ import SidebarAdmin from "../global/SidebarAdmin";
 // school year range 2020..2035
 const YEARS = Array.from({ length: 16 }, (_, i) => String(2020 + i));
 
+const getSubjectCodeError = (code) => {
+  if (!code) return null;
+  const letters = code.match(/^[A-Za-z]+/)?.[0] || "";
+  const digits = code.match(/\d+$/)?.[0] || "";
+  
+  if (letters.length < 4) return "Must have at least 4 leading letters";
+  if (digits.length !== 4) return "Must end with exactly 4 digits";
+  if (code.length !== letters.length + digits.length) return "Cannot mix letters and digits";
+  return null;
+};
+
+const getTimeError = (start, end) => {
+  if (!start && !end) return null;
+  if (!start || !end) return "Both start and end times required";
+
+  const toMinutes = (t) => {
+    const [hh, mm] = t.split(":").map(n => parseInt(n, 10));
+    return hh * 60 + mm;
+  };
+
+  const startMin = toMinutes(start);
+  const endMin = toMinutes(end);
+  const earliest = 7 * 60; 
+  const latest = 18 * 60;
+
+  if (startMin < earliest || startMin > latest) 
+    return "Start time must be between 07:00-18:00";
+  if (endMin < earliest || endMin > latest)
+    return "End time must be between 07:00-18:00";
+  if (startMin >= endMin)
+    return "Start time must be before end time";
+  if (endMin - startMin > 180)
+    return "Duration cannot exceed 3 hours";
+  
+  return null;
+};
+
 const ClassList = () => {
   const { subjectId } = useParams();
   const { role } = useAuth();
@@ -441,6 +478,53 @@ const ClassList = () => {
         </tr>,
       ];
 
+  const renderSubjectCodeIcon = (code) => {
+    if (!code) return null;
+
+    const error = getSubjectCodeError(code);
+    if (error) {
+      return (
+        <div className="relative inline-flex group">
+          <span className="text-red-500">❗</span>
+          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+            <div className="text-red-600 font-medium mb-1">Invalid Format</div>
+            <div className="text-sm">{error}</div>
+          </div>
+        </div>
+      );
+    }
+
+    const letters = code.match(/^[A-Za-z]+/)?.[0] || "";
+    if (letters.length > 4) {
+      return (
+        <div className="relative inline-flex group">
+          <span className="text-yellow-500">⚠️</span>
+          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+            <div className="text-yellow-600 font-medium mb-1">Non-standard Format</div>
+            <div className="text-sm">Subject code has more than 4 leading letters</div>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  const renderTimeIcon = (start, end) => {
+    const error = getTimeError(start, end);
+    if (!error) return null;
+
+    return (
+      <div className="relative inline-flex group">
+        <span className="text-red-500">❗</span>
+        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+          <div className="text-red-600 font-medium mb-1">Invalid Time</div>
+          <div className="text-sm">{error}</div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-white">
       <TopbarAdmin />
@@ -512,19 +596,24 @@ const ClassList = () => {
                           className="w-full border p-2 rounded"
                         />
                       </div>
-                      <div className="mb-2">
+                      <div className="mb-2 relative">
                         <label className="block text-sm font-medium">Subject Code</label>
-                        <input
-                          type="text"
-                          value={editingSubjectData?.subjectCode || ""}
-                          onChange={(e) =>
-                            setEditingSubjectData((p) => ({
-                              ...p,
-                              subjectCode: e.target.value.replace(/[^A-Za-z0-9]/g, "").slice(0, 12).replace(/[a-z]/g, (c) => c.toUpperCase()),
-                            }))
-                          }
-                          className="w-full border p-2 rounded"
-                        />
+                        <div className="flex items-center">
+                          <input
+                            type="text"
+                            value={editingSubjectData?.subjectCode || ""}
+                            onChange={(e) =>
+                              setEditingSubjectData((p) => ({
+                                ...p,
+                                subjectCode: e.target.value.replace(/[^A-Za-z0-9]/g, "").slice(0, 12).toUpperCase(),
+                              }))
+                            }
+                            className="w-full border p-2 rounded"
+                          />
+                          <div className="absolute right-2">
+                            {renderSubjectCodeIcon(editingSubjectData?.subjectCode)}
+                          </div>
+                        </div>
                       </div>
                     </>
                   ) : (
@@ -569,7 +658,7 @@ const ClassList = () => {
 
                       <div className="mb-2">
                         <label className="block text-sm font-medium">Time</label>
-                        <div className="flex gap-2">
+                        <div className="flex gap-2 items-center">
                           <input
                             type="time"
                             min="07:00"
@@ -586,6 +675,9 @@ const ClassList = () => {
                             onChange={(e) => setEditingSubjectData((p) => ({ ...p, endTime: e.target.value }))}
                             className="w-1/2 border p-2 rounded"
                           />
+                          <div className="ml-2">
+                            {renderTimeIcon(editingSubjectData?.startTime, editingSubjectData?.endTime)}
+                          </div>
                         </div>
                         <p className="text-xs text-gray-500 mt-1">Times must be between 07:00 and 18:00; duration ≤ 3 hours.</p>
                       </div>
@@ -605,7 +697,7 @@ const ClassList = () => {
                       <div className="mb-2">
                         <label className="block text-sm font-medium">School Year</label>
                         <div className="flex gap-2">
-                          <div className="w-1/2" ref={startRef}>
+                          <div className="w-1/2 relative" ref={startRef}>
                             <button
                               type="button"
                               onClick={() => { setStartOpen((s) => !s); setEndOpen(false); }}
@@ -614,7 +706,7 @@ const ClassList = () => {
                               {editingSubjectData?.schoolYearStart || "—"}
                             </button>
                             {startOpen && (
-                              <div className="absolute left-0 right-0 mt-2 bg-white border rounded shadow max-h-40 overflow-y-auto z-50">
+                              <div className="absolute left-0 mt-2 w-32 bg-white border rounded shadow max-h-40 overflow-y-auto z-50">
                                 {YEARS.map((y) => (
                                   <button
                                     key={y}
@@ -634,7 +726,7 @@ const ClassList = () => {
                             )}
                           </div>
 
-                          <div className="w-1/2" ref={endRef}>
+                          <div className="w-1/2 relative" ref={endRef}>
                             <button
                               type="button"
                               onClick={() => { setEndOpen((s) => !s); setStartOpen(false); }}
@@ -643,7 +735,7 @@ const ClassList = () => {
                               {editingSubjectData?.schoolYearEnd || "—"}
                             </button>
                             {endOpen && (
-                              <div className="absolute left-0 right-0 mt-2 bg-white border rounded shadow max-h-40 overflow-y-auto z-50">
+                              <div className="absolute left-0 mt-2 w-32 bg-white border rounded shadow max-h-40 overflow-y-auto z-50">
                                 {YEARS.map((y) => (
                                   <button
                                     key={y}
