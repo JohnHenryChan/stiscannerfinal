@@ -6,6 +6,11 @@ import { db } from "../firebaseConfig.js";
 const YEARS = Array.from({ length: 16 }, (_, i) => String(2020 + i)); // 2020..2035
 
 const Subject = ({ visible, onClose, onSubmit, initialData }) => {
+  const startRef = useRef(null);
+  const endRef = useRef(null);
+  const [startOpen, setStartOpen] = useState(false);
+  const [endOpen, setEndOpen] = useState(false);
+
   const [formData, setFormData] = useState({
     program: "",
     subject: "",
@@ -20,12 +25,101 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
   });
 
   const [errorMessage, setErrorMessage] = useState("");
+  const [subjectCodeWarning, setSubjectCodeWarning] = useState(false);
+  const [allowProceedWarnings, setAllowProceedWarnings] = useState(false);
   const docSub = collection(db, "subjectList");
 
-  const [startOpen, setStartOpen] = useState(false);
-  const [endOpen, setEndOpen] = useState(false);
-  const startRef = useRef(null);
-  const endRef = useRef(null);
+  // Helper functions for validation
+  const isSubjectCodeValid = (code) => {
+    if (!code) return true; // empty is handled elsewhere
+    return /^[A-Za-z]{4,}\d{4}$/.test(code);
+  };
+
+  const getSubjectCodeError = (code) => {
+    if (!code) return null;
+    const letters = code.match(/^[A-Za-z]+/)?.[0] || "";
+    const digits = code.match(/\d+$/)?.[0] || "";
+    
+    if (letters.length < 4) return "Must have at least 4 leading letters";
+    if (digits.length !== 4) return "Must end with exactly 4 digits";
+    if (code.length !== letters.length + digits.length) return "Cannot mix letters and digits";
+    return null;
+  };
+
+  const getTimeError = (start, end) => {
+    if (!start && !end) return null;
+    if (!start || !end) return "Both start and end times required";
+
+    const toMinutes = (t) => {
+      const [hh, mm] = t.split(":").map(n => parseInt(n, 10));
+      return hh * 60 + mm;
+    };
+
+    const startMin = toMinutes(start);
+    const endMin = toMinutes(end);
+    const earliest = 7 * 60; // 7:00
+    const latest = 18 * 60; // 18:00
+
+    if (startMin < earliest || startMin > latest) 
+      return "Start time must be between 07:00-18:00";
+    if (endMin < earliest || endMin > latest)
+      return "End time must be between 07:00-18:00";
+    if (startMin >= endMin)
+      return "Start time must be before end time";
+    if (endMin - startMin > 180)
+      return "Duration cannot exceed 3 hours";
+    
+    return null;
+  };
+
+  // Render warning icons with expandable tooltips
+  const renderSubjectCodeIcon = () => {
+    const code = formData.subjectCode;
+    if (!code) return null;
+
+    const error = getSubjectCodeError(code);
+    if (error) {
+      return (
+        <div className="relative inline-flex group">
+          <span className="text-red-500">❗</span>
+          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+            <div className="text-red-600 font-medium mb-1">Invalid Format</div>
+            <div className="text-sm">{error}</div>
+          </div>
+        </div>
+      );
+    }
+
+    const letters = code.match(/^[A-Za-z]+/)?.[0] || "";
+    if (letters.length > 4) {
+      return (
+        <div className="relative inline-flex group">
+          <span className="text-yellow-500">⚠️</span>
+          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+            <div className="text-yellow-600 font-medium mb-1">Non-standard Format</div>
+            <div className="text-sm">Subject code has more than 4 leading letters</div>
+          </div>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
+  const renderTimeIcon = () => {
+    const error = getTimeError(formData.startTime, formData.endTime);
+    if (!error) return null;
+
+    return (
+      <div className="relative inline-flex group">
+        <span className="text-red-500">❗</span>
+        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-50 w-64 p-2 bg-white rounded-md shadow-lg border border-gray-200">
+          <div className="text-red-600 font-medium mb-1">Invalid Time</div>
+          <div className="text-sm">{error}</div>
+        </div>
+      </div>
+    );
+  };
 
   useEffect(() => {
     const onDocClick = (e) => {
@@ -38,6 +132,10 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
 
   useEffect(() => {
     if (visible) {
+      // Reset dropdown states when modal opens/closes
+      setStartOpen(false);
+      setEndOpen(false);
+      
       let safeData = initialData ? { ...initialData } : {};
 
       safeData.days = Array.isArray(safeData.days)
@@ -90,11 +188,20 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
         semester: safeData.semester || "",
       });
       setErrorMessage("");
+      // update warning flag based on restored code
+      const leadingMatch = (safeData.subjectCode || "").match(/^([A-Za-z]+)/);
+      const leadingCount = leadingMatch ? leadingMatch[1].length : 0;
+      setSubjectCodeWarning(leadingCount > 4);
     }
   }, [visible, initialData]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
+
+    // Reset allowProceedWarnings when subjectCode changes
+    if (name === "subjectCode") {
+      setAllowProceedWarnings(false);
+    }
 
     // Program: letters-only, auto-uppercase, max 4 chars enforced during typing
     if (name === "program") {
@@ -109,44 +216,51 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
       const sanitized = value.replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
       const upper = sanitized.replace(/[a-z]/g, (c) => c.toUpperCase());
       setFormData((prev) => ({ ...prev, subjectCode: upper }));
+
+      // Determine leading letters count from start of string (allow more than 4)
+      const leadingMatch = upper.match(/^([A-Za-z]+)/);
+      const leadingCount = leadingMatch ? leadingMatch[1].length : 0;
+      // Show non-blocking yellow warning icon only when leading letters are MORE than 4
+      setSubjectCodeWarning(leadingCount > 4);
+
       setErrorMessage("");
       return;
     }
 
     // keep generic handling for other fields (school year handled by selectors below)
     setFormData((prev) => ({ ...prev, [name]: value }));
-
     setErrorMessage("");
   };
 
   // Handlers for school year select -> auto-fill paired year and clamp within 2020-2035
   const handleSchoolYearStartChange = (val) => {
     if (!val) {
-      // clearing start should also clear end
       setFormData((prev) => ({ ...prev, schoolYearStart: "", schoolYearEnd: "" }));
-      return;
+    } else {
+      const startNum = Math.max(2020, Math.min(2035, Number(val)));
+      const endNum = Math.min(2035, startNum + 1);
+      setFormData((prev) => ({
+        ...prev,
+        schoolYearStart: String(startNum),
+        schoolYearEnd: String(endNum),
+      }));
     }
-    const startNum = Math.max(2020, Math.min(2035, Number(val)));
-    const endNum = Math.min(2035, startNum + 1);
-    setFormData((prev) => ({
-      ...prev,
-      schoolYearStart: String(startNum),
-      schoolYearEnd: String(endNum),
-    }));
+    setStartOpen(false);
   };
 
   const handleSchoolYearEndChange = (val) => {
     if (!val) {
       setFormData((prev) => ({ ...prev, schoolYearStart: "", schoolYearEnd: "" }));
-      return;
+    } else {
+      const endNum = Math.max(2020, Math.min(2035, Number(val)));
+      const startNum = Math.max(2020, endNum - 1);
+      setFormData((prev) => ({
+        ...prev,
+        schoolYearStart: String(startNum),
+        schoolYearEnd: String(endNum),
+      }));
     }
-    const endNum = Math.max(2020, Math.min(2035, Number(val)));
-    const startNum = Math.max(2020, endNum - 1);
-    setFormData((prev) => ({
-      ...prev,
-      schoolYearStart: String(startNum),
-      schoolYearEnd: String(endNum),
-    }));
+    setEndOpen(false);
   };
 
   const handleDayToggle = (day) => {
@@ -180,35 +294,30 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
       return;
     }
 
-    // Leading letters at start
-    const leadingLettersMatch = (subjectCode || "").match(/^[A-Za-z]*/);
-    const leadingLetters = leadingLettersMatch ? leadingLettersMatch[0] : "";
+    // Determine leading letters count
+    const leadingMatch = (subjectCode || "").match(/^([A-Za-z]+)/);
+    const leadingLetters = leadingMatch ? leadingMatch[1] : "";
     const leadingLettersCount = leadingLetters.length;
 
-    // Block: must have at least 4 leading letters
+    // Blocking validation: must be letters (>=4) immediately followed by exactly 4 digits, and nothing else
+    const strictPattern = /^[A-Za-z]{4,}\d{4}$/;
+    if (!strictPattern.test(subjectCode)) {
+      setErrorMessage("Subject Code invalid format.");
+      return;
+    }
+
+    // If leading letters < 4 (should be caught by pattern but keep explicit guard)
     if (leadingLettersCount < 4) {
-      setErrorMessage("Invalid Subject Code format.");
+      setErrorMessage("Subject Code invalid format.");
       return;
     }
 
-    // ensure there exists exactly 4 digits immediately following the initial letters:
-    const altMatch = (subjectCode || "").match(/^([A-Za-z]+)(\d{4})([A-Za-z0-9]*)$/);
-    if (!altMatch) {
-      setErrorMessage("Invalid Subject Code format.");
-      return;
-    }
-
-    // format and change warnings
-    const strictStandard = /^[A-Za-z]{4}\d{4}$/;
-    const formatWarning = !strictStandard.test(subjectCode);
+    // Evaluate non-blocking warnings:
     const codeChanged = Boolean(initialData && initialData.subjectCode && initialData.subjectCode !== subjectCode);
-    const hasWarning = formatWarning || codeChanged;
-
-    // NOTE: no inline warning message displayed here (redundant warnings removed).
-    // format/code-change still signal parent via `hasWarning` so ConfirmModal can run.
+    // Non-blocking warning condition: leading letters more than 4 OR code changed
+    const hasWarning = leadingLettersCount > 4 || codeChanged;
 
     // SCHOOL YEAR & TIME validation (unchanged)
-    // School year validation (start earlier than end and end = start + 1)
     if ((schoolYearStart && !schoolYearEnd) || (!schoolYearStart && schoolYearEnd)) {
       setErrorMessage("Please provide both Start Year and End Year, or leave both empty.");
       return;
@@ -258,32 +367,35 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
       }
     }
 
-    // DUPLICATE CHECK — now sets blocking errorMessage (no inline warnings)
+    // DUPLICATE CHECK — blocks duplicate subjectCode when creating or changing code
     try {
       const targetRef = doc(db, "subjectList", subjectCode);
       const targetSnap = await getDoc(targetRef);
 
-      // Creating new subject -> duplicate blocks
       if (!initialData && targetSnap.exists()) {
         setErrorMessage("A subject with that code already exists. Please pick a different code or edit the existing subject.");
         return;
       }
 
-      // Editing and changing code -> duplicate blocks
       if (initialData && codeChanged && targetSnap.exists()) {
         setErrorMessage("A subject with that code already exists. Please pick a different code or edit the existing subject.");
         return;
       }
     } catch (err) {
       console.warn("Duplicate check failed:", err);
-      // don't block submit on network error; leave a non-blocking console warning
+      // non-blocking on network error
     }
 
-    // Pass warning flag to parent. If there is a non-blocking warning, parent should show ConfirmModal.
+    // Pass warning flag to parent. Parent should show ConfirmModal if hasWarning is true.
     if (typeof onSubmit === "function") {
       onSubmit(formData, hasWarning);
     }
+    
+    // Reset states on successful submit
     if (!hasWarning) {
+      setAllowProceedWarnings(false);
+      setStartOpen(false);
+      setEndOpen(false);
       onClose();
     }
   };
@@ -316,16 +428,19 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
             className="w-full border rounded-md p-2"
           />
 
-          {/* Subject Code input (inline warnings removed) */}
-          <div className="relative">
+          {/* Subject Code input with warning icons */}
+          <div className="relative flex items-center">
             <input
               type="text"
               name="subjectCode"
-              placeholder="Subject Code"
+              placeholder="Subject Code (letters then 4 digits)"
               value={formData.subjectCode}
               onChange={handleChange}
-              className="w-full border rounded-md p-2 pr-2"
+              className="w-full border rounded-md p-2 pr-10"
             />
+            <div className="absolute right-2 top-2">
+              {renderSubjectCodeIcon()}
+            </div>
           </div>
 
           <select
@@ -416,7 +531,7 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
             <option value="2nd Semester">2nd Semester</option>
           </select>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
             <input
               type="time"
               name="startTime"
@@ -435,6 +550,9 @@ const Subject = ({ visible, onClose, onSubmit, initialData }) => {
               max="18:00"
               className="w-full border rounded-md p-2"
             />
+            <div className="ml-2">
+              {renderTimeIcon()}
+            </div>
           </div>
 
           <div>
