@@ -17,14 +17,37 @@ import {
   getDocs,
   doc,
   getDoc,
+  setDoc,
   query,
   where,
   orderBy,
   limit,
-  doc as firestoreDoc,
 } from "firebase/firestore";
 import { db } from "../../firebaseConfig";
 import { useAuth } from "../../context/AuthContext";
+
+// dry-run: when true only logs planned writes (no writes to attendance/config)
+const WRITE_ABSENCE_DRY_RUN = false;
+
+// helper: format local YYYY-MM-DD
+const formatDateLocal = (d) => {
+  const date = d instanceof Date ? d : new Date(d);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+};
+
+// helper: inclusive date iterator
+const iterateDatesInclusive = (startDate, endDate) => {
+  const out = [];
+  const cur = new Date(startDate);
+  cur.setHours(0,0,0,0);
+  const end = new Date(endDate);
+  end.setHours(0,0,0,0);
+  while (cur <= end) {
+    out.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+};
 
 const Dashboard = () => {
   const { user } = useAuth();
@@ -42,6 +65,8 @@ const Dashboard = () => {
   const [latestTodayEntries, setLatestTodayEntries] = useState([]);
   // aggregated monthly chart data (Late, Absent, Present)
   const [chartData, setChartData] = useState([]);
+  const [subjectList, setSubjectList] = useState([]);
+  const [allStudents, setAllStudents] = useState([]);
 
   // use consistent 3-letter month abbreviations (matches chart keys)
   const months = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -304,6 +329,179 @@ const Dashboard = () => {
       cancelled = true;
     };
   }, [selectedYear]);
+
+  // on-mount check for writeAbsence
+  useEffect(() => {
+    const checkWriteAbsence = async () => {
+      try {
+        console.log("[Dashboard - writeAbsence] starting mount check...");
+
+        const cfgRef = doc(db, "system", "attendance");
+        let cfgSnap = null;
+        try {
+          cfgSnap = await getDoc(cfgRef);
+        } catch (err) {
+          console.warn("[Dashboard - writeAbsence] failed reading config doc:", err);
+        }
+        const rawVal = cfgSnap?.exists() ? cfgSnap.data()?.writeAbsence : null;
+        console.log("[Dashboard - writeAbsence] config raw value:", rawVal);
+
+        const parseStoredDate = (v) => {
+          if (!v) return null;
+          if (typeof v === "object" && typeof v.toDate === "function") return v.toDate();
+          const parsed = new Date(String(v));
+          return isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const storedDate = parseStoredDate(rawVal);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Normalize to start of day
+        const todayStr = formatDateLocal(today);
+
+        try {
+          const sSnap = await getDocs(collection(db, "subjectList"));
+          const subjects = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setSubjectList(subjects);
+          console.log("[Dashboard - writeAbsence] loaded subjectList count:", subjects.length);
+        } catch (err) {
+          console.error("[Dashboard - writeAbsence] failed to fetch subjectList:", err);
+        }
+
+        try {
+          const studSnap = await getDocs(collection(db, "students"));
+          const students = studSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setAllStudents(students);
+          console.log("[Dashboard - writeAbsence] loaded students count:", students.length);
+        } catch (err) {
+          console.error("[Dashboard - writeAbsence] failed to fetch students:", err);
+        }
+
+        if (!storedDate) {
+          console.log("[Dashboard - writeAbsence] no writeAbsence value or invalid -> will set to today:", todayStr);
+          console.log("[Dashboard - writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no write performed)" : "UPDATING CONFIG");
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+            console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
+          }
+          return;
+        }
+
+        // Normalize stored date to start of day
+        const normalizedStoredDate = new Date(storedDate);
+        normalizedStoredDate.setHours(0, 0, 0, 0);
+        const storedStr = formatDateLocal(normalizedStoredDate);
+        
+        console.log("[Dashboard - writeAbsence] parsed stored date:", storedStr, "today:", todayStr);
+
+        if (storedStr === todayStr) {
+          console.log("[Dashboard - writeAbsence] stored date equals today -> nothing to do");
+          return;
+        }
+
+        if (normalizedStoredDate > today) {
+          console.log("[Dashboard - writeAbsence] stored date is in the future -> resetting to today");
+          console.log("[Dashboard - writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (would update config)" : "UPDATING CONFIG");
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+            console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
+          }
+          return;
+        }
+
+        // Include stored date, iterate up to YESTERDAY (not today)
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
+        yesterday.setHours(0, 0, 0, 0);
+        
+        console.log("[Dashboard - writeAbsence] stored date is before today -> processing range", storedStr, "to", formatDateLocal(yesterday));
+
+        if (normalizedStoredDate > yesterday) {
+          console.log("[Dashboard - writeAbsence] stored date is today or yesterday -> nothing to process");
+          return;
+        }
+
+        // ITERATE FROM storedDate (INCLUSIVE) TO yesterday (INCLUSIVE)
+        const datesToProcess = iterateDatesInclusive(normalizedStoredDate, yesterday);
+        console.log("[Dashboard - writeAbsence] dates to process:", datesToProcess.map(d => formatDateLocal(d)));
+
+        const subjects = subjectList.length ? subjectList : (await getDocs(collection(db, "subjectList"))).docs.map(d=>({id:d.id,...d.data()}));
+        const studentsCache = allStudents.length ? allStudents : (await getDocs(collection(db, "students"))).docs.map(d=>({id:d.id,...d.data()}));
+
+        for (const dateObj of datesToProcess) {
+          const dateStr = formatDateLocal(dateObj);
+          const weekday = dateObj.toLocaleDateString("en-US", { weekday: "short" });
+          console.log(`[Dashboard - writeAbsence] processing date ${dateStr} (weekday ${weekday})`);
+
+          const subjectsForDate = subjects.filter(s => s.active !== false && Array.isArray(s.days) && s.days.includes(weekday));
+          console.log(`[Dashboard - writeAbsence] subjects active on ${dateStr}:`, subjectsForDate.map(s => ({ id: s.id, subject: s.subject || s.name })));
+
+          for (const subj of subjectsForDate) {
+            const subjectId = subj.id;
+            const subjectName = subj.subject || subj.name || subjectId;
+
+            let enrolledIds = Array.isArray(subj.studentIds) ? subj.studentIds.slice() : [];
+            if ((!enrolledIds || enrolledIds.length === 0)) {
+              try {
+                const studentsCol = collection(db, "subjectList", subjectId, "students");
+                const sSnap = await getDocs(studentsCol);
+                if (!sSnap.empty) enrolledIds = sSnap.docs.map(d => d.id);
+              } catch (err) {
+                console.warn("[Dashboard - writeAbsence] failed to fetch enrolled students subcollection for", subjectId, err);
+              }
+            }
+
+            console.log(`[Dashboard - writeAbsence] subject ${subjectId} (${subjectName}) has ${enrolledIds.length} enrolled students`);
+
+            for (const studentId of enrolledIds) {
+              try {
+                const attRef = doc(db, "attendance", dateStr, subjectId, studentId);
+                const attSnap = await getDoc(attRef);
+                if (attSnap.exists()) {
+                  console.log(`[Dashboard - writeAbsence] attendance already exists - skipping: attendance/${dateStr}/${subjectId}/${studentId}`, attSnap.data());
+                  continue;
+                }
+
+                const studentData = studentsCache.find(s => s.id === studentId) || {};
+                const payload = {
+                  subjectId,
+                  subjectName,
+                  studentId,
+                  name: studentData.name || `${studentData.firstName || ""} ${studentData.lastName || ""}`.trim() || null,
+                  rfid: studentData.rfid || null,
+                  year: studentData.year || studentData.yearLevel || null,
+                  date: dateStr,
+                  remark: "Absent"
+                };
+
+                console.log("[Dashboard - writeAbsence] WILL WRITE absent document (or log):", {
+                  path: `attendance/${dateStr}/${subjectId}/${studentId}`,
+                  payload,
+                  dryRun: WRITE_ABSENCE_DRY_RUN
+                });
+
+                if (!WRITE_ABSENCE_DRY_RUN) {
+                  await setDoc(attRef, payload);
+                  console.log("[Dashboard - writeAbsence] wrote absent doc:", `attendance/${dateStr}/${subjectId}/${studentId}`);
+                }
+              } catch (err) {
+                console.error("[Dashboard - writeAbsence] error checking/writing attendance for", { dateStr, subjectId, studentId }, err);
+              }
+            }
+          }
+        }
+
+        console.log("[Dashboard - writeAbsence] processing complete. would update config to today:", todayStr, "action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no update performed)" : "UPDATING CONFIG");
+        if (!WRITE_ABSENCE_DRY_RUN) {
+          await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+          console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
+        }
+      } catch (err) {
+        console.error("[Dashboard - writeAbsence] unexpected error:", err);
+      }
+    };
+
+    checkWriteAbsence();
+  }, []);
 
   // helpers for rendering
   const totalsToday = useMemo(() => {
