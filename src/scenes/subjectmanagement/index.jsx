@@ -27,6 +27,7 @@ const SubjectManagement = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [isSubjectOpen, setIsSubjectOpen] = useState(false);
   const [subjects, setSubjects] = useState([]);
+  const [instructors, setInstructors] = useState([]); // NEW: list of instructors
   const [editingData, setEditingData] = useState(null);
   const [selectedProgram, setSelectedProgram] = useState("All Programs");
   const [selectedSY, setSelectedSY] = useState("All School Years");
@@ -114,6 +115,17 @@ const SubjectManagement = () => {
     fetchSubjects();
     return () => unsubscribe && unsubscribe();
   }, [user]);
+
+  // 🔹 NEW: Fetch instructors (role = "instructor")
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "instructors"), (snap) => {
+      const data = snap.docs
+        .map((doc) => ({ ...doc.data(), id: doc.id }))
+        .filter((inst) => inst.role === "instructor");
+      setInstructors(data);
+    });
+    return () => unsub();
+  }, []);
 
   // 🔹 Distinct dropdown values
   const distinctPrograms = [
@@ -411,6 +423,45 @@ const SubjectManagement = () => {
     });
   };
 
+  // 🔹 NEW: Handle instructor assignment change
+  const handleInstructorChange = async (subjectId, newInstructorId) => {
+    try {
+      const oldInstructorId = subjects.find(s => s.id === subjectId)?.assignedInstructor;
+
+      // Update the subject document with the new assigned instructor
+      await updateDoc(doc(db, "subjectList", subjectId), {
+        assignedInstructor: newInstructorId || null,
+      });
+
+      // Remove subjectId from old instructor's subjectList array (if exists)
+      if (oldInstructorId) {
+        const oldInstRef = doc(db, "instructors", oldInstructorId);
+        const oldInstSnap = await getDoc(oldInstRef);
+        if (oldInstSnap.exists()) {
+          const oldSubjectList = oldInstSnap.data().subjectList || [];
+          const updated = oldSubjectList.filter(code => code !== subjectId);
+          await updateDoc(oldInstRef, { subjectList: updated });
+        }
+      }
+
+      // Add subjectId to new instructor's subjectList array
+      if (newInstructorId) {
+        const newInstRef = doc(db, "instructors", newInstructorId);
+        const newInstSnap = await getDoc(newInstRef);
+        if (newInstSnap.exists()) {
+          const currentSubjectList = newInstSnap.data().subjectList || [];
+          if (!currentSubjectList.includes(subjectId)) {
+            await updateDoc(newInstRef, {
+              subjectList: [...currentSubjectList, subjectId]
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to update assigned instructor:", err);
+    }
+  };
+
   // 🔹 Filtering
   const filteredSubjects = subjects.filter((subj) => {
     const programMatch =
@@ -538,7 +589,10 @@ const SubjectManagement = () => {
                   <th className="py-2 px-4 border">Year Level</th>
                   <th className="py-2 px-4 border">School Year</th>
                   <th className="py-2 px-4 border">Semester</th>
-                  {user?.role === "admin" && (
+                  {user?.role !== "instructor" && (
+                    <th className="py-2 px-4 border">Assigned Instructor</th>
+                  )}
+                  {(user?.role === "admin" || user?.role === "registrar") && (
                     <>
                       <th className="py-2 px-4 border">Status</th>
                       <th className="py-2 px-4 border">Action</th>
@@ -549,58 +603,89 @@ const SubjectManagement = () => {
 
               <tbody>
                 {filteredSubjects.length > 0 ? (
-                  filteredSubjects.map((subj, index) => (
-                    <tr key={index} className="text-center">
-                      <td className="py-2 px-4 border">{subj.program}</td>
-                      <td className="py-2 px-4 border">
-                        <Link
-                          to={`/admin/subjects/${subj.id}`}
-                          className="text-blue-600 hover:underline"
-                        >
-                          {subj.subject}
-                        </Link>
-                      </td>
-                      <td className="py-2 px-4 border">{subj.subjectCode}</td>
-                      <td className="py-2 px-4 border">{subj.yearLevel}</td>
-                      <td className="py-2 px-4 border">
-                        {subj.schoolYearStart}-{subj.schoolYearEnd}
-                      </td>
-                      <td className="py-2 px-4 border">
-                        {subj.semester || "—"}
-                      </td>
+                  filteredSubjects.map((subj, index) => {
+                    const assignedInst = instructors.find((inst) => inst.id === subj.assignedInstructor);
+                    return (
+                      <tr key={index} className="text-center">
+                        <td className="py-2 px-4 border">{subj.program}</td>
+                        <td className="py-2 px-4 border">
+                          <Link
+                            to={`/admin/subjects/${subj.id}`}
+                            className="text-blue-600 hover:underline"
+                          >
+                            {subj.subject}
+                          </Link>
+                        </td>
+                        <td className="py-2 px-4 border">{subj.subjectCode}</td>
+                        <td className="py-2 px-4 border">{subj.yearLevel}</td>
+                        <td className="py-2 px-4 border">
+                          {subj.schoolYearStart}-{subj.schoolYearEnd}
+                        </td>
+                        <td className="py-2 px-4 border">
+                          {subj.semester || "—"}
+                        </td>
+                        {user?.role !== "instructor" && (
+                          <td className="py-2 px-4 border">
+                            {(user?.role === "admin" || user?.role === "registrar") ? (
+                              <select
+                                value={subj.assignedInstructor || ""}
+                                onChange={(e) => handleInstructorChange(subj.id, e.target.value)}
+                                className="border px-2 py-1 rounded text-sm"
+                              >
+                                <option value="">None</option>
+                                {instructors.map((inst) => (
+                                  <option key={inst.id} value={inst.id}>
+                                    {inst.name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-gray-700">
+                                {instructors.find((inst) => inst.id === subj.assignedInstructor)?.name || "None"}
+                              </span>
+                            )}
+                          </td>
+                        )}
 
-                      {user?.role === "admin" && (
-                        <>
-                          <td className="py-2 px-4 border">
-                            <button
-                              className={`px-3 py-1 rounded text-sm font-medium ${
-                                subj.active
-                                  ? "bg-green-100 text-green-800"
-                                  : "bg-red-100 text-red-800"
-                              }`}
-                              onClick={() => toggleStatus(subj)}
-                            >
-                              {subj.active ? "Active" : "Inactive"}
-                            </button>
-                          </td>
-                          <td className="py-2 px-4 border">
-                            <div className="flex justify-center gap-4">
-                              <button onClick={() => handleEdit(index)}>
-                                <FaPen className="text-black hover:text-blue-600 cursor-pointer" />
+                        {(user?.role === "admin" || user?.role === "registrar") && (
+                          <>
+                            <td className="py-2 px-4 border">
+                              <button
+                                className={`px-3 py-1 rounded text-sm font-medium ${
+                                  subj.active
+                                    ? "bg-green-100 text-green-800"
+                                    : "bg-red-100 text-red-800"
+                                }`}
+                                onClick={() => toggleStatus(subj)}
+                              >
+                                {subj.active ? "Active" : "Inactive"}
                               </button>
-                              <button onClick={() => handleDelete(index)}>
-                                <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" />
-                              </button>
-                            </div>
-                          </td>
-                        </>
-                      )}
-                    </tr>
-                  ))
+                            </td>
+                            <td className="py-2 px-4 border">
+                              <div className="flex justify-center gap-4">
+                                <button onClick={() => handleEdit(index)}>
+                                  <FaPen className="text-black hover:text-blue-600 cursor-pointer" />
+                                </button>
+                                <button onClick={() => handleDelete(index)}>
+                                  <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" />
+                                </button>
+                              </div>
+                            </td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
                     <td
-                      colSpan="8"
+                      colSpan={
+                        user?.role === "instructor" 
+                          ? 6 
+                          : (user?.role === "admin" || user?.role === "registrar") 
+                            ? 9 
+                            : 7
+                      }
                       className="py-4 text-center text-gray-500 italic"
                     >
                       No subjects found.

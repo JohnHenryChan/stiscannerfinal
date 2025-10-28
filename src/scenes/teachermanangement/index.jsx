@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { MdSearch } from "react-icons/md";
-import { FaTrash, FaPen, FaPlus } from "react-icons/fa";
+import { FaTrash, FaPen } from "react-icons/fa";
 import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import AddInstructor from "../../components/AddInstructor";
-import EditSubjectListModal from "../../components/EditSubjectListModal";
-import ConfirmModal from "../../components/ConfirmModal";
+// import EditSubjectListModal from "../../components/EditSubjectListModal"; // removed
+// import ConfirmModal from "../../components/ConfirmModal"; // removed: use local modal declared here
 import { db, functions } from "../../firebaseConfig";
 import {
   collection,
@@ -20,6 +20,58 @@ import { httpsCallable } from "firebase/functions";
 import { useAuth } from "../../context/AuthContext";
 import AccessDenied from "../../components/AccessDenied";
 
+// NOTE: instructor.id = Firestore doc id (instructors/{id})
+//       instructor.uid = Firebase Auth UID (used by Cloud Function)
+
+// Local confirm modal (disable BOTH buttons while deleting)
+const LocalConfirmModal = ({
+  visible,
+  title = "Confirm",
+  message = "",
+  onConfirm,
+  onCancel,
+  confirmDisabled = false,
+  confirmText = "Confirm",
+}) => {
+  if (!visible) return null;
+
+  const baseBtn = "px-4 py-2 rounded";
+  const disableUX = "opacity-60 cursor-not-allowed pointer-events-none";
+  const cancelEnabled = `${baseBtn} border border-gray-300 text-gray-700 hover:bg-gray-100`;
+  const cancelDisabledStyles = `${baseBtn} border border-gray-200 text-gray-400 bg-gray-100 ${disableUX}`;
+  const confirmEnabled = `${baseBtn} bg-red-600 text-white hover:bg-red-700`;
+  const confirmDisabledStyles = `${baseBtn} bg-gray-300 text-gray-600 ${disableUX}`;
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+      <div className="bg-white rounded-md shadow-lg w-full max-w-md p-6">
+        <h3 className="text-lg font-semibold mb-2">{title}</h3>
+        <p className="text-sm text-gray-600 mb-6">{message}</p>
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={confirmDisabled}
+            aria-disabled={confirmDisabled}
+            className={confirmDisabled ? cancelDisabledStyles : cancelEnabled}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={confirmDisabled}
+            aria-disabled={confirmDisabled}
+            className={confirmDisabled ? confirmDisabledStyles : confirmEnabled}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const InstructorManagement = () => {
   const { user } = useAuth();
   const role = user?.role || "unknown";
@@ -28,18 +80,11 @@ const InstructorManagement = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [instructors, setInstructors] = useState([]);
-  const [subjects, setSubjects] = useState([]);
   const [editingData, setEditingData] = useState(null);
-
-  const [isEditSubjectsOpen, setIsEditSubjectsOpen] = useState(false);
-  const [currentInstructorSubjects, setCurrentInstructorSubjects] = useState([]);
-  const [selectedInstructorId, setSelectedInstructorId] = useState("");
-  const [selectedInstructorName, setSelectedInstructorName] = useState("");
 
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [instructorToDelete, setInstructorToDelete] = useState(null);
-
- 
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Fetch instructors
   useEffect(() => {
@@ -49,26 +94,6 @@ const InstructorManagement = () => {
     return () => unsub();
   }, []);
 
-  // Fetch subject list
-  useEffect(() => {
-    const unsub = onSnapshot(collection(db, "subjectList"), (snap) => {
-      setSubjects(snap.docs.map((doc) => ({ ...doc.data(), id: doc.id })));
-    });
-    return () => unsub();
-  }, []);
-
-  const getSubjectNames = (ids) => {
-    return ids?.length
-      ? ids
-          .map((id) => {
-            const subj = subjects.find((s) => s.id === id);
-            return subj ? `${subj.subject} (${subj.yearLevel})` : null;
-          })
-          .filter(Boolean)
-          .join(", ")
-      : "—";
-  };
-
   const handleOpen = () => {
     setEditingData(null);
     setTimeout(() => setIsModalOpen(true), 0);
@@ -76,20 +101,44 @@ const InstructorManagement = () => {
 
   const handleClose = () => setIsModalOpen(false);
 
+  // Create Fire Auth user via callable, then persist Firestore instructor doc
   const handleSubmit = async (data) => {
-    // Skip existence check if editing
-    if (!editingData) {
-      const ref = doc(db, "instructors", data.id);
-      const exists = await getDoc(ref);
-      if (exists.exists()) {
-        console.warn("❌ Duplicate ID detected, skipping");
-        return;
+    try {
+      if (!editingData) {
+        const ref = doc(db, "instructors", data.id);
+        const exists = await getDoc(ref);
+        if (exists.exists()) {
+          console.warn("❌ Duplicate ID detected, skipping");
+          return;
+        }
       }
-    }
 
-    //await setDoc(doc(db, "instructors", data.id), data, { merge: true });
-    setEditingData(null);
-    setIsModalOpen(false);
+      let uidFromAuth = null;
+      try {
+        const createUser = httpsCallable(functions, "createUserByAdmin"); // server-side Admin SDK
+        const resp = await createUser({
+          email: data.email,
+          password: data.password || data.tempPassword || "TempPass123!",
+          displayName: data.name,
+          role: data.role || "instructor",
+          id: data.id,
+        });
+        uidFromAuth = resp?.data?.uid || resp?.data?.result?.uid || null;
+      } catch (e) {
+        console.warn("createUserByAdmin failed or not deployed:", e?.message || e);
+      }
+
+      await setDoc(
+        doc(db, "instructors", data.id),
+        { ...data, uid: uidFromAuth || data.uid || null },
+        { merge: true }
+      );
+
+      setEditingData(null);
+      setIsModalOpen(false);
+    } catch (e) {
+      console.error("Add/Update instructor failed:", e?.message || e);
+    }
   };
 
   const handleEdit = (index) => {
@@ -102,39 +151,50 @@ const InstructorManagement = () => {
     setIsDeleteModalOpen(true);
   };
 
+  // Cancel: just close modal (no safe-restore logic)
+  const cancelDelete = () => {
+    setIsDeleteModalOpen(false);
+    setInstructorToDelete(null);
+    setIsDeleting(false);
+  };
+
+  // Confirm: disable both buttons, delete Auth user (if any) then Firestore doc. Log all steps.
   const confirmDelete = async () => {
-    if (instructorToDelete) {
-      // Delete Firestore doc
-      await deleteDoc(doc(db, "instructors", instructorToDelete.id));
+    if (!instructorToDelete) return;
+    setIsDeleting(true);
 
-      // Delete Auth user
-      if (instructorToDelete.uid) {
-        try {
-          const deleteUser = httpsCallable(functions, "deleteUserByUid");
-          await deleteUser({ uid: instructorToDelete.uid });
-          console.log("✅ Auth user deleted:", instructorToDelete.uid);
-        } catch (err) {
-          console.error("🔥 Failed to delete auth user:", err.message);
-        }
+    const { id: instructorId, uid, email, name } = instructorToDelete;
+
+    console.log(`[Delete] Begin for instructorId=${instructorId}, uid=${uid || "n/a"}, email=${email || "n/a"}`);
+
+    // 1) Delete Firebase Auth user by UID via Cloud Function
+    try {
+      if (uid) {
+        console.log(`[Delete] Calling deleteUserByUid for uid=${uid}`);
+        const deleteUser = httpsCallable(functions, "deleteUserByUid");
+        const res = await deleteUser({ uid, email: email || null });
+        console.log("[Delete] Auth delete response:", res?.data || res);
+      } else {
+        console.warn("[Delete] No uid on instructor document; skipping Auth delete.");
       }
-
-      setInstructorToDelete(null);
-      setIsDeleteModalOpen(false);
+    } catch (err) {
+      const msg = String(err?.message || err);
+      console.warn("[Delete] Auth delete failed (continuing to Firestore):", msg);
     }
-  };
 
-  const openEditSubjectsModal = (instructor) => {
-    setSelectedInstructorId(instructor.id);
-    setSelectedInstructorName(instructor.name || "Instructor");
-    setCurrentInstructorSubjects(instructor.subjectList || []);
-    setIsEditSubjectsOpen(true);
-  };
-
-  const handleSubjectListSave = async (updatedList) => {
-    await updateDoc(doc(db, "instructors", selectedInstructorId), {
-      subjectList: updatedList,
-    });
-    setIsEditSubjectsOpen(false);
+    // 2) Delete Firestore instructor document
+    try {
+      console.log(`[Delete] Deleting Firestore document instructors/${instructorId} (${name || "Unnamed"})`);
+      await deleteDoc(doc(db, "instructors", instructorId));
+      console.log("[Delete] Firestore document deleted:", instructorId);
+    } catch (err) {
+      console.error("[Delete] Firestore delete failed:", err?.message || err);
+    } finally {
+      setIsDeleting(false);
+      setIsDeleteModalOpen(false);
+      setInstructorToDelete(null);
+      console.log("[Delete] Finished");
+    }
   };
 
   const filteredInstructors = instructors.filter((inst) =>
@@ -149,7 +209,7 @@ const InstructorManagement = () => {
       <div className="flex flex-grow">
         <SidebarAdmin />
         <div className="flex flex-col flex-grow px-8 py-6 bg-white">
-          <h1 className="text-2xl font-semibold mb-4">Instructor Management</h1>
+          <h1 className="text-2xl font-semibold mb-4">User Management</h1>
 
           {/* 🔍 Search + Add */}
           <div className="flex justify-between items-center mb-6">
@@ -170,7 +230,7 @@ const InstructorManagement = () => {
               onClick={handleOpen}
               className="bg-[#0057A4] text-white px-6 py-2 rounded-sm shadow hover:bg-blue-800 transition-all"
             >
-              Add Instructor
+              Add New User
             </button>
           </div>
 
@@ -179,11 +239,9 @@ const InstructorManagement = () => {
             <table className="min-w-full table-auto border border-gray-200">
               <thead className="bg-gray-100">
                 <tr>
-                  <th className="py-2 px-4 border">Instructor Name</th>
-                  <th className="py-2 px-4 border">Instructor ID</th>
-                  <th className="py-2 px-4 border">Role</th> {/* ✅ Added Role */}
-                  <th className="py-2 px-4 border">Subject List</th>
-                  <th className="py-2 px-4 border">Edit Subjects</th>
+                  <th className="py-2 px-4 border">Name</th>
+                  <th className="py-2 px-4 border">User ID</th>
+                  <th className="py-2 px-4 border">Role</th>
                   <th className="py-2 px-4 border">Email</th>
                   <th className="py-2 px-4 border">Action</th>
                 </tr>
@@ -195,18 +253,6 @@ const InstructorManagement = () => {
                     <td className="py-2 px-4 border">{inst.id || "—"}</td>
                     <td className="py-2 px-4 border capitalize">
                       {inst.role || "instructor"}
-                    </td>
-                    <td className="py-2 px-4 border whitespace-normal max-w-xs">
-                      {getSubjectNames(inst.subjectList)}
-                    </td>
-                    <td className="py-2 px-4 border">
-                      <button
-                        onClick={() => openEditSubjectsModal(inst)}
-                        className="text-blue-600 hover:text-blue-800 text-lg"
-                        title="Edit Subjects"
-                      >
-                        <FaPlus />
-                      </button>
                     </td>
                     <td className="py-2 px-4 border">{inst.email || "—"}</td>
                     <td className="py-2 px-4 border">
@@ -224,10 +270,10 @@ const InstructorManagement = () => {
                 {filteredInstructors.length === 0 && (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={5}
                       className="py-4 text-center text-gray-500 italic"
                     >
-                      No instructors found.
+                      No users found.
                     </td>
                   </tr>
                 )}
@@ -244,24 +290,16 @@ const InstructorManagement = () => {
             initialData={editingData}
           />
 
-          <EditSubjectListModal
-            visible={isEditSubjectsOpen}
-            onClose={() => setIsEditSubjectsOpen(false)}
-            onSave={handleSubjectListSave}
-            subjects={subjects}
-            selectedSubjects={currentInstructorSubjects}
-            instructorName={selectedInstructorName}
-          />
+          {/* removed: EditSubjectListModal */}
 
-          <ConfirmModal
+          <LocalConfirmModal
             visible={isDeleteModalOpen}
             title="Confirm Deletion"
-            message={`Are you sure you want to delete ${instructorToDelete?.name}?`}
+            message={`Are you sure you want to delete ${instructorToDelete?.name || "this user"}? (${instructorToDelete?.email || "no email"})`}
             onConfirm={confirmDelete}
-            onCancel={() => {
-              setInstructorToDelete(null);
-              setIsDeleteModalOpen(false);
-            }}
+            onCancel={cancelDelete}
+            confirmDisabled={isDeleting}
+            confirmText={isDeleting ? "Deleting..." : "Confirm"}
           />
         </div>
       </div>
