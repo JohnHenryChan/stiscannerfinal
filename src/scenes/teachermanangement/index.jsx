@@ -103,42 +103,9 @@ const InstructorManagement = () => {
 
   // Create Fire Auth user via callable, then persist Firestore instructor doc
   const handleSubmit = async (data) => {
-    try {
-      if (!editingData) {
-        const ref = doc(db, "instructors", data.id);
-        const exists = await getDoc(ref);
-        if (exists.exists()) {
-          console.warn("❌ Duplicate ID detected, skipping");
-          return;
-        }
-      }
-
-      let uidFromAuth = null;
-      try {
-        const createUser = httpsCallable(functions, "createUserByAdmin"); // server-side Admin SDK
-        const resp = await createUser({
-          email: data.email,
-          password: data.password || data.tempPassword || "TempPass123!",
-          displayName: data.name,
-          role: data.role || "instructor",
-          id: data.id,
-        });
-        uidFromAuth = resp?.data?.uid || resp?.data?.result?.uid || null;
-      } catch (e) {
-        console.warn("createUserByAdmin failed or not deployed:", e?.message || e);
-      }
-
-      await setDoc(
-        doc(db, "instructors", data.id),
-        { ...data, uid: uidFromAuth || data.uid || null },
-        { merge: true }
-      );
-
-      setEditingData(null);
-      setIsModalOpen(false);
-    } catch (e) {
-      console.error("Add/Update instructor failed:", e?.message || e);
-    }
+    // Persistence is handled inside AddInstructor after confirm.
+    setEditingData(null);
+    setIsModalOpen(false);
   };
 
   const handleEdit = (index) => {

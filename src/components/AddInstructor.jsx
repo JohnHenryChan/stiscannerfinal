@@ -14,10 +14,10 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     role: initialData?.role || "instructor",
   });
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState(isEdit ? 2 : 1);
-  const [instructorID, setInstructorID] = useState(initialData?.id || "");
   const [error, setError] = useState("");
   const [emailError, setEmailError] = useState("");
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [changedFields, setChangedFields] = useState([]);
 
   // --- Reset state when modal closes/opens ---
   useEffect(() => {
@@ -28,30 +28,26 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
         email: initialData?.email || "",
         role: initialData?.role || "instructor",
       });
-      setInstructorID(initialData?.id || "");
-      setStep(isEdit ? 2 : 1);
       setError("");
       setEmailError("");
+      setShowConfirm(false);
+      setChangedFields([]);
     }
-  }, [visible, isEdit, initialData]);
+  }, [visible, initialData]);
 
   if (!visible) return null;
 
   // --- Validation: Instructor ID must be exactly 11 digits ---
   const validateInstructorID = (id) => {
-    const trimmed = id.trim();
-    if (trimmed.length !== 11) {
-      return "Instructor ID must be exactly 11 digits.";
-    }
-    if (!/^\d{11}$/.test(trimmed)) {
-      return "Instructor ID must contain only numbers.";
-    }
+    const trimmed = (id || "").trim();
+    if (trimmed.length !== 11) return "Instructor ID must be exactly 11 digits.";
+    if (!/^\d{11}$/.test(trimmed)) return "Instructor ID must contain only numbers.";
     return null;
   };
 
-  // --- Validation: Email format <string>@vigan.sti.edu.ph (no duplicate @, valid format) ---
+  // --- Validation: Email format <string>@vigan.sti.edu.ph ---
   const validateEmail = (email) => {
-    const trimmed = email.trim();
+    const trimmed = (email || "").trim();
     if (!trimmed.endsWith("@vigan.sti.edu.ph")) {
       return "Email must be in format: <username>@vigan.sti.edu.ph";
     }
@@ -60,196 +56,204 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
       return "Email format is invalid. Use: <username>@vigan.sti.edu.ph";
     }
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(trimmed)) {
-      return "Invalid email format.";
-    }
+    if (!emailRegex.test(trimmed)) return "Invalid email format.";
     return null;
   };
 
-  // --- Step 1: Check Instructor ID ---
-  const handleIDCheck = async () => {
-    const trimmedID = instructorID.trim();
-    
-    const idError = validateInstructorID(trimmedID);
-    if (idError) {
-      setError(idError);
-      return;
-    }
-
-    setError("");
-    setLoading(true);
-
-    try {
-      const ref = doc(db, "instructors", trimmedID);
-      const snap = await getDoc(ref);
-
-      const isSameID = initialData?.id === trimmedID;
-
-      if (snap.exists() && !isEdit && !isSameID) {
-        setError("Instructor ID already exists.");
-        return;
-      }
-
-      setFormData((prev) => ({ ...prev, id: trimmedID }));
-      setStep(2);
-    } catch (err) {
-      console.error("🔍 Error checking ID:", err);
-      setError("Failed to validate Instructor ID.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // --- Step 2: Form change handler ---
+  // --- Change handler ---
   const handleChange = (e) => {
     const { name, value } = e.target;
-    
-    if (name === "instructorID") {
+
+    if (name === "id" && !isEdit) {
       const digitsOnly = value.replace(/\D/g, "").slice(0, 11);
-      setInstructorID(digitsOnly);
+      setFormData((prev) => ({ ...prev, id: digitsOnly }));
       return;
     }
 
-    // Real-time email validation
-    if (name === "email") {
+    if (name === "email" && !isEdit) {
       const emailValidationError = validateEmail(value);
       setEmailError(emailValidationError || "");
     }
-    
+
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const isFormValid = () => {
     const { id, name, email } = formData;
-    if (!id || !name || !email) return false;
-    if (validateEmail(email)) return false;
+    if (!name) return false;
+    if (!isEdit) {
+      if (!id || validateInstructorID(id)) return false;
+      if (!email || validateEmail(email)) return false;
+    }
     return true;
   };
 
   // --- Check for duplicate email (excluding current user in edit mode) ---
   const checkDuplicateEmail = async (email) => {
     try {
-      const instructorsSnap = await getDocs(collection(db, "instructors"));
-      const duplicate = instructorsSnap.docs.find((d) => {
+      const snap = await getDocs(collection(db, "instructors"));
+      const duplicate = snap.docs.find((d) => {
         const data = d.data();
         if (isEdit && d.id === formData.id) return false;
-        return data.email?.toLowerCase() === email.toLowerCase();
+        return data.email?.toLowerCase() === (email || "").toLowerCase();
       });
-      return duplicate ? true : false;
-    } catch (err) {
-      console.error("Error checking duplicate email:", err);
+      return !!duplicate;
+    } catch {
       return false;
     }
   };
 
-  // --- Submit ---
+  const buildChangedFields = () => {
+    if (!isEdit) return [];
+    const changes = [];
+    if (initialData?.name !== formData.name) {
+      changes.push({ field: "Name", from: initialData?.name || "", to: formData.name });
+    }
+    if (initialData?.role !== formData.role) {
+      changes.push({ field: "Role", from: initialData?.role || "", to: formData.role });
+    }
+    // ID and Email are locked in edit mode.
+    return changes;
+  };
+
+  // --- Submit: validate then open confirm modal ---
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
 
-    const { email, id, name, role } = formData;
+    const { id, name, email } = formData;
 
-    if (!email || !id || !name) {
-      setError("All fields are required.");
+    if (!isFormValid()) {
+      setError("Please complete all required fields.");
       return;
     }
 
-    const emailValidationError = validateEmail(email);
-    if (emailValidationError) {
-      setError(emailValidationError);
+    if (!isEdit) {
+      // Duplicate ID check
+      const idError = validateInstructorID(id);
+      if (idError) return setError(idError);
+
+      try {
+        const ref = doc(db, "instructors", id.trim());
+        const snap = await getDoc(ref);
+        if (snap.exists()) return setError("Instructor ID already exists.");
+      } catch {
+        return setError("Failed to validate Instructor ID.");
+      }
+
+      // Email validation & duplicate check
+      const emailValidationError = validateEmail(email);
+      if (emailValidationError) return setError(emailValidationError);
+
+      const isDup = await checkDuplicateEmail(email);
+      if (isDup) return setError("Email already exists. Please use a different email.");
+
+      setChangedFields([]);
+      setShowConfirm(true);
       return;
     }
 
-    const isDuplicate = await checkDuplicateEmail(email);
-    if (isDuplicate) {
-      setError("Email already exists. Please use a different email.");
-      return;
-    }
+    // Edit: compute changed fields
+    const changes = buildChangedFields();
+    if (changes.length === 0) return setError("No changes to save.");
+    setChangedFields(changes);
+    setShowConfirm(true);
+  };
 
+  // --- Confirm: persist changes (create or update) ---
+  const handleConfirm = async () => {
     setLoading(true);
+    setError("");
+
+    const { id, name, email, role } = formData;
 
     try {
       if (isEdit) {
-        await updateDoc(doc(db, "instructors", id), {
-          name,
-          email,
-          role,
-        });
+        // Update Firestore only on edit (no Functions)
+        await updateDoc(doc(db, "instructors", id), { name, role, email });
       } else {
-        const createInstructorUser = httpsCallable(functions, "createInstructorUser");
-        const result = await createInstructorUser({ email, name });
-        const uid = result.data.uid;
+        // Create via callable function, then Firestore doc
+        let uid = null;
+        try {
+          const createByAdmin = httpsCallable(functions, "createUserByAdmin");
+          const resp = await createByAdmin({
+            email,
+            password: "TempPass123!",
+            displayName: name,
+            role: role || "instructor",
+            id,
+          });
+          uid = resp?.data?.uid || resp?.data?.result?.uid || null;
+        } catch {
+          const createInstructorUser = httpsCallable(functions, "createInstructorUser");
+          const resp2 = await createInstructorUser({ email, name });
+          uid = resp2?.data?.uid || null;
+        }
 
-        const instructorData = {
+        await setDoc(doc(db, "instructors", id), {
           id,
           name,
           email,
           uid,
           role,
           mustChangePassword: true,
-        };
-
-        await setDoc(doc(db, "instructors", id), instructorData);
+        });
       }
 
-      onAdd(formData);
-      onClose();
+      onAdd?.(formData);
+      setShowConfirm(false);
+      onClose?.();
     } catch (err) {
-      console.error("🔥 Error saving instructor:", err);
-      setError(err.message || "Unknown error occurred.");
+      setError(err?.message || "Failed to save.");
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div className="bg-white w-full max-w-md rounded-xl shadow-lg p-6 animate-fade-in">
-        <h2 className="text-lg font-semibold mb-4">
-          {isEdit
-            ? "Edit User"
-            : step === 1
-            ? "Enter User ID"
-            : "User Details"}
-        </h2>
-
-        {/* --- Step 1: Enter Instructor ID --- */}
-        {!isEdit && step === 1 ? (
-          <div className="space-y-4">
-            <input
-              name="instructorID"
-              placeholder="User ID (11 digits)"
-              value={instructorID}
-              onChange={handleChange}
-              maxLength={11}
-              className="w-full border px-3 py-2 rounded"
-            />
-            {error && <p className="text-red-600 text-sm">{error}</p>}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="bg-gray-300 px-4 py-2 rounded hover:bg-gray-400"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleIDCheck}
-                disabled={loading}
-                className="bg-blue-700 text-white px-6 py-2 rounded hover:bg-blue-800 disabled:bg-gray-300"
-              >
-                {loading ? "Checking..." : "Next"}
-              </button>
+  const renderConfirmContent = () => {
+    if (isEdit) {
+      return (
+        <div className="space-y-2">
+          {changedFields.map((c) => (
+            <div key={c.field} className="text-sm">
+              <span className="font-semibold">{c.field}: </span>
+              <span className="text-gray-600">{String(c.from)}</span>
+              <span className="mx-2">--&gt;</span>
+              <span className="text-gray-900">{String(c.to)}</span>
             </div>
-          </div>
-        ) : (
+          ))}
+        </div>
+      );
+    }
+    return (
+      <div className="text-sm space-y-1">
+        <div><span className="font-semibold">ID:</span> {formData.id}</div>
+        <div><span className="font-semibold">Name:</span> {formData.name}</div>
+        <div><span className="font-semibold">Email:</span> {formData.email}</div>
+        <div><span className="font-semibold">Role:</span> {formData.role}</div>
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+        <div className="bg-white w-full max-w-md rounded-xl shadow-lg p-6 animate-fade-in">
+          <h2 className="text-lg font-semibold mb-4">
+            {isEdit ? "Edit User" : "Add User"}
+          </h2>
+
           <form onSubmit={handleSubmit} className="space-y-4">
             <input
               name="id"
               value={formData.id}
-              disabled
-              className="w-full border px-3 py-2 rounded bg-gray-100 cursor-not-allowed"
+              placeholder="User ID (11 digits)"
+              onChange={handleChange}
+              disabled={isEdit}
+              maxLength={11}
+              className={`w-full border px-3 py-2 rounded ${isEdit ? "bg-gray-100 cursor-not-allowed" : ""}`}
             />
+
             <input
               name="name"
               placeholder="Name"
@@ -257,8 +261,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
               onChange={handleChange}
               className="w-full border px-3 py-2 rounded"
             />
-            
-            {/* Email input with tooltip icon */}
+
             <div className="relative">
               <input
                 name="email"
@@ -266,11 +269,12 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
                 placeholder="Email (e.g., username@vigan.sti.edu.ph)"
                 value={formData.email}
                 onChange={handleChange}
+                disabled={isEdit}
                 className={`w-full border px-3 py-2 rounded ${
-                  emailError ? "border-red-500" : ""
-                }`}
+                  emailError && !isEdit ? "border-red-500" : ""
+                } ${isEdit ? "bg-gray-100 cursor-not-allowed" : ""}`}
               />
-              {emailError && formData.email && (
+              {emailError && formData.email && !isEdit && (
                 <div className="absolute right-2 top-2">
                   <div className="relative inline-flex group">
                     <span className="text-red-500 cursor-help">❗</span>
@@ -299,8 +303,9 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
             <div className="flex justify-end gap-2">
               <button
                 type="button"
-                onClick={onClose}
+                onClick={() => onClose?.()}
                 className="bg-gray-300 px-4 py-2 rounded hover:bg-gray-400"
+                disabled={loading}
               >
                 Cancel
               </button>
@@ -308,18 +313,48 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
                 type="submit"
                 disabled={!isFormValid() || loading}
                 className={`px-6 py-2 rounded text-white ${
-                  isFormValid() && !loading
-                    ? "bg-blue-700 hover:bg-blue-800"
-                    : "bg-gray-300 cursor-not-allowed"
+                  isFormValid() && !loading ? "bg-blue-700 hover:bg-blue-800" : "bg-gray-300 cursor-not-allowed"
                 }`}
               >
-                {loading ? "Saving..." : isEdit ? "Update" : "Add User"}
+                {isEdit ? "Review Changes" : "Review Create"}
               </button>
             </div>
           </form>
-        )}
+        </div>
       </div>
-    </div>
+
+      {showConfirm && (
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60">
+          <div className="bg-white w-full max-w-md rounded-xl shadow-xl p-6">
+            <h3 className="text-lg font-semibold mb-3">
+              {isEdit ? "Confirm Changes?" : "Create User?"}
+            </h3>
+            {renderConfirmContent()}
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowConfirm(false);
+                  onClose?.(); // Discard on cancel
+                }}
+                className="bg-gray-300 px-4 py-2 rounded hover:bg-gray-400"
+                disabled={loading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                className="bg-blue-700 text-white px-6 py-2 rounded hover:bg-blue-800 disabled:bg-gray-300"
+                disabled={loading}
+              >
+                {loading ? "Saving..." : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
