@@ -25,32 +25,14 @@ import {
 } from "firebase/firestore";
 import { db } from "../../firebaseConfig";
 import { useAuth } from "../../context/AuthContext";
+import { processStreaksFromLastRun } from "../../utils/processStreaks";
 
 // dry-run: when true only logs planned writes (no writes to attendance/config)
 const WRITE_ABSENCE_DRY_RUN = false;
 
-// helper: format local YYYY-MM-DD
-const formatDateLocal = (d) => {
-  const date = d instanceof Date ? d : new Date(d);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-};
-
-// helper: inclusive date iterator
-const iterateDatesInclusive = (startDate, endDate) => {
-  const out = [];
-  const cur = new Date(startDate);
-  cur.setHours(0,0,0,0);
-  const end = new Date(endDate);
-  end.setHours(0,0,0,0);
-  while (cur <= end) {
-    out.push(new Date(cur));
-    cur.setDate(cur.getDate() + 1);
-  }
-  return out;
-};
-
 const Dashboard = () => {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
+
   const [selectedYear, setSelectedYear] = useState(
     new Date().getFullYear().toString()
   );
@@ -65,8 +47,6 @@ const Dashboard = () => {
   const [latestTodayEntries, setLatestTodayEntries] = useState([]);
   // aggregated monthly chart data (Late, Absent, Present)
   const [chartData, setChartData] = useState([]);
-  const [subjectList, setSubjectList] = useState([]);
-  const [allStudents, setAllStudents] = useState([]);
 
   // use consistent 3-letter month abbreviations (matches chart keys)
   const months = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -86,18 +66,115 @@ const Dashboard = () => {
 
   const getCurrentTimeHHMM = () => new Date().toTimeString().slice(0, 5); // "HH:MM"
 
+  // Console logging helper
+  console.log("🚀 [Dashboard] Component rendered");
+  console.log("👤 [Dashboard] Current user:", user);
+  console.log("⏳ [Dashboard] Auth loading:", authLoading);
+
+  // === Dashboard Processing with streak integration ===
+  useEffect(() => {
+    console.log("🔄 [Dashboard] Starting dashboard processing...");
+    
+    if (authLoading) {
+      console.log("⏳ [Dashboard] Waiting for auth to complete...");
+      return;
+    }
+
+    if (!user) {
+      console.warn("❌ [Dashboard] No user found, skipping processing");
+      return;
+    }
+
+    console.log("✅ [Dashboard] User authenticated, starting processing");
+    console.log("📊 [Dashboard] User details:", {
+      uid: user.uid,
+      email: user.email,
+      name: user.name,
+      role: user.role
+    });
+
+    const runDashboardProcessing = async () => {
+      try {
+        // Get current PH time
+        const now = new Date();
+        const phNow = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Manila" }));
+        const todayStr = `${phNow.getFullYear()}-${String(phNow.getMonth() + 1).padStart(2, "0")}-${String(phNow.getDate()).padStart(2, "0")}`;
+        
+        console.log("📅 [Dashboard] Current PH date:", todayStr);
+        console.log("🕐 [Dashboard] Current PH time:", phNow.toLocaleString());
+
+        // Check system/attendance config
+        console.log("🔍 [Dashboard] Checking system/attendance config...");
+        const cfgRef = doc(db, "system", "attendance");
+        const cfgSnap = await getDoc(cfgRef);
+        const cfg = cfgSnap.exists() ? cfgSnap.data() : {};
+        
+        console.log("📋 [Dashboard] Current config:", cfg);
+
+        // Handle writeAbsence and streak processing
+        const storedWriteDate = cfg.writeAbsence || null;
+
+        console.log("📝 [Dashboard] Write absence last run:", storedWriteDate);
+
+        // Write absence check (existing logic)
+        if (!storedWriteDate || storedWriteDate !== todayStr) {
+          console.log("⚠️ [Dashboard] Write absence needed for:", todayStr);
+          
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            console.log("✍️ [Dashboard] Updating writeAbsence config...");
+            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
+            console.log("✅ [Dashboard] WriteAbsence config updated successfully");
+          } else {
+            console.log("🧪 [Dashboard] DRY RUN mode - not updating writeAbsence");
+          }
+        } else {
+          console.log("✅ [Dashboard] Write absence already done for today");
+        }
+
+        // Process streaks (new integration)
+        console.log("🔢 [Dashboard] Starting streak processing...");
+        
+        try {
+          const streakResult = await processStreaksFromLastRun(user.uid);
+          
+          if (streakResult === null) {
+            console.log("⏭️ [Dashboard] Streak processing skipped (already done or lease active)");
+          } else {
+            console.log("✅ [Dashboard] Streak processing completed successfully:", streakResult);
+          }
+        } catch (streakError) {
+          console.error("🔥 [Dashboard] Streak processing failed:", streakError);
+        }
+
+      } catch (error) {
+        console.error("🔥 [Dashboard] Overall processing failed:", error);
+        console.error("🔥 [Dashboard] Error details:", {
+          message: error.message,
+          code: error.code,
+          stack: error.stack
+        });
+      }
+      
+      console.log("🏁 [Dashboard] Dashboard processing completed");
+    };
+
+    runDashboardProcessing();
+  }, [user, authLoading]);
+
   // === totals ===
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
+        console.log("📊 [Dashboard] Loading totals...");
         const sSnap = await getDocs(collection(db, "students"));
         const iSnap = await getDocs(collection(db, "instructors"));
         if (!mounted) return;
         setTotalStudents(sSnap.size);
         setTotalTeachers(iSnap.size);
+        console.log("📊 [Dashboard] Totals loaded - Students:", sSnap.size, "Teachers:", iSnap.size);
       } catch (err) {
-        console.error("Failed to fetch totals:", err);
+        console.error("🔥 [Dashboard] Failed to fetch totals:", err);
         if (mounted) {
           setTotalStudents(0);
           setTotalTeachers(0);
@@ -130,6 +207,7 @@ const Dashboard = () => {
 
     const fetchToday = async () => {
       try {
+        console.log("📚 [Dashboard] Loading today's subjects...");
         // load all subjects and pick active ones (no role-based ownership filtering)
         const subsSnap = await getDocs(collection(db, "subjectList"));
         console.log("[Dashboard] loaded subjectList count:", subsSnap.size);
@@ -245,7 +323,7 @@ const Dashboard = () => {
           });
         }
       } catch (err) {
-        console.error("Failed to load today's activity:", err);
+        console.error("🔥 [Dashboard] Failed to load today's activity:", err);
         if (!cancelled) {
           setTodaySubjects([]);
           setLatestTodayEntries([]);
@@ -264,6 +342,7 @@ const Dashboard = () => {
     let cancelled = false;
     (async () => {
       try {
+        console.log("📈 [Dashboard] Building chart data for year:", selectedYear);
         // prepare months
         const monthShorts = [
           "Jan",
@@ -285,6 +364,8 @@ const Dashboard = () => {
         // fetch all attendance date documents (top-level); doc ids assumed "YYYY-MM-DD"
         const datesSnap = await getDocs(collection(db, "attendance"));
         const dateDocs = datesSnap.docs.map((d) => d.id).filter((id) => id.startsWith(selectedYear));
+
+        console.log("📈 [Dashboard] Found", dateDocs.length, "date documents for", selectedYear);
 
         // load subject list once for subcollection iteration
         const subsSnap = await getDocs(collection(db, "subjectList"));
@@ -319,9 +400,12 @@ const Dashboard = () => {
         }
 
         const arr = Object.values(map);
-        if (!cancelled) setChartData(arr);
+        if (!cancelled) {
+          setChartData(arr);
+          console.log("📈 [Dashboard] Chart data updated for", selectedYear);
+        }
       } catch (err) {
-        console.error("Failed to build chart data:", err);
+        console.error("🔥 [Dashboard] Failed to build chart data:", err);
         if (!cancelled) setChartData([]);
       }
     })();
@@ -329,179 +413,6 @@ const Dashboard = () => {
       cancelled = true;
     };
   }, [selectedYear]);
-
-  // on-mount check for writeAbsence
-  useEffect(() => {
-    const checkWriteAbsence = async () => {
-      try {
-        console.log("[Dashboard - writeAbsence] starting mount check...");
-
-        const cfgRef = doc(db, "system", "attendance");
-        let cfgSnap = null;
-        try {
-          cfgSnap = await getDoc(cfgRef);
-        } catch (err) {
-          console.warn("[Dashboard - writeAbsence] failed reading config doc:", err);
-        }
-        const rawVal = cfgSnap?.exists() ? cfgSnap.data()?.writeAbsence : null;
-        console.log("[Dashboard - writeAbsence] config raw value:", rawVal);
-
-        const parseStoredDate = (v) => {
-          if (!v) return null;
-          if (typeof v === "object" && typeof v.toDate === "function") return v.toDate();
-          const parsed = new Date(String(v));
-          return isNaN(parsed.getTime()) ? null : parsed;
-        };
-
-        const storedDate = parseStoredDate(rawVal);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0); // Normalize to start of day
-        const todayStr = formatDateLocal(today);
-
-        try {
-          const sSnap = await getDocs(collection(db, "subjectList"));
-          const subjects = sSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-          setSubjectList(subjects);
-          console.log("[Dashboard - writeAbsence] loaded subjectList count:", subjects.length);
-        } catch (err) {
-          console.error("[Dashboard - writeAbsence] failed to fetch subjectList:", err);
-        }
-
-        try {
-          const studSnap = await getDocs(collection(db, "students"));
-          const students = studSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-          setAllStudents(students);
-          console.log("[Dashboard - writeAbsence] loaded students count:", students.length);
-        } catch (err) {
-          console.error("[Dashboard - writeAbsence] failed to fetch students:", err);
-        }
-
-        if (!storedDate) {
-          console.log("[Dashboard - writeAbsence] no writeAbsence value or invalid -> will set to today:", todayStr);
-          console.log("[Dashboard - writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no write performed)" : "UPDATING CONFIG");
-          if (!WRITE_ABSENCE_DRY_RUN) {
-            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
-            console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
-          }
-          return;
-        }
-
-        // Normalize stored date to start of day
-        const normalizedStoredDate = new Date(storedDate);
-        normalizedStoredDate.setHours(0, 0, 0, 0);
-        const storedStr = formatDateLocal(normalizedStoredDate);
-        
-        console.log("[Dashboard - writeAbsence] parsed stored date:", storedStr, "today:", todayStr);
-
-        if (storedStr === todayStr) {
-          console.log("[Dashboard - writeAbsence] stored date equals today -> nothing to do");
-          return;
-        }
-
-        if (normalizedStoredDate > today) {
-          console.log("[Dashboard - writeAbsence] stored date is in the future -> resetting to today");
-          console.log("[Dashboard - writeAbsence] action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (would update config)" : "UPDATING CONFIG");
-          if (!WRITE_ABSENCE_DRY_RUN) {
-            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
-            console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
-          }
-          return;
-        }
-
-        // Include stored date, iterate up to YESTERDAY (not today)
-        const yesterday = new Date(today);
-        yesterday.setDate(today.getDate() - 1);
-        yesterday.setHours(0, 0, 0, 0);
-        
-        console.log("[Dashboard - writeAbsence] stored date is before today -> processing range", storedStr, "to", formatDateLocal(yesterday));
-
-        if (normalizedStoredDate > yesterday) {
-          console.log("[Dashboard - writeAbsence] stored date is today or yesterday -> nothing to process");
-          return;
-        }
-
-        // ITERATE FROM storedDate (INCLUSIVE) TO yesterday (INCLUSIVE)
-        const datesToProcess = iterateDatesInclusive(normalizedStoredDate, yesterday);
-        console.log("[Dashboard - writeAbsence] dates to process:", datesToProcess.map(d => formatDateLocal(d)));
-
-        const subjects = subjectList.length ? subjectList : (await getDocs(collection(db, "subjectList"))).docs.map(d=>({id:d.id,...d.data()}));
-        const studentsCache = allStudents.length ? allStudents : (await getDocs(collection(db, "students"))).docs.map(d=>({id:d.id,...d.data()}));
-
-        for (const dateObj of datesToProcess) {
-          const dateStr = formatDateLocal(dateObj);
-          const weekday = dateObj.toLocaleDateString("en-US", { weekday: "short" });
-          console.log(`[Dashboard - writeAbsence] processing date ${dateStr} (weekday ${weekday})`);
-
-          const subjectsForDate = subjects.filter(s => s.active !== false && Array.isArray(s.days) && s.days.includes(weekday));
-          console.log(`[Dashboard - writeAbsence] subjects active on ${dateStr}:`, subjectsForDate.map(s => ({ id: s.id, subject: s.subject || s.name })));
-
-          for (const subj of subjectsForDate) {
-            const subjectId = subj.id;
-            const subjectName = subj.subject || subj.name || subjectId;
-
-            let enrolledIds = Array.isArray(subj.studentIds) ? subj.studentIds.slice() : [];
-            if ((!enrolledIds || enrolledIds.length === 0)) {
-              try {
-                const studentsCol = collection(db, "subjectList", subjectId, "students");
-                const sSnap = await getDocs(studentsCol);
-                if (!sSnap.empty) enrolledIds = sSnap.docs.map(d => d.id);
-              } catch (err) {
-                console.warn("[Dashboard - writeAbsence] failed to fetch enrolled students subcollection for", subjectId, err);
-              }
-            }
-
-            console.log(`[Dashboard - writeAbsence] subject ${subjectId} (${subjectName}) has ${enrolledIds.length} enrolled students`);
-
-            for (const studentId of enrolledIds) {
-              try {
-                const attRef = doc(db, "attendance", dateStr, subjectId, studentId);
-                const attSnap = await getDoc(attRef);
-                if (attSnap.exists()) {
-                  console.log(`[Dashboard - writeAbsence] attendance already exists - skipping: attendance/${dateStr}/${subjectId}/${studentId}`, attSnap.data());
-                  continue;
-                }
-
-                const studentData = studentsCache.find(s => s.id === studentId) || {};
-                const payload = {
-                  subjectId,
-                  subjectName,
-                  studentId,
-                  name: studentData.name || `${studentData.firstName || ""} ${studentData.lastName || ""}`.trim() || null,
-                  rfid: studentData.rfid || null,
-                  year: studentData.year || studentData.yearLevel || null,
-                  date: dateStr,
-                  remark: "Absent"
-                };
-
-                console.log("[Dashboard - writeAbsence] WILL WRITE absent document (or log):", {
-                  path: `attendance/${dateStr}/${subjectId}/${studentId}`,
-                  payload,
-                  dryRun: WRITE_ABSENCE_DRY_RUN
-                });
-
-                if (!WRITE_ABSENCE_DRY_RUN) {
-                  await setDoc(attRef, payload);
-                  console.log("[Dashboard - writeAbsence] wrote absent doc:", `attendance/${dateStr}/${subjectId}/${studentId}`);
-                }
-              } catch (err) {
-                console.error("[Dashboard - writeAbsence] error checking/writing attendance for", { dateStr, subjectId, studentId }, err);
-              }
-            }
-          }
-        }
-
-        console.log("[Dashboard - writeAbsence] processing complete. would update config to today:", todayStr, "action:", WRITE_ABSENCE_DRY_RUN ? "DRY-RUN (no update performed)" : "UPDATING CONFIG");
-        if (!WRITE_ABSENCE_DRY_RUN) {
-          await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
-          console.log("[Dashboard - writeAbsence] config updated to today:", todayStr);
-        }
-      } catch (err) {
-        console.error("[Dashboard - writeAbsence] unexpected error:", err);
-      }
-    };
-
-    checkWriteAbsence();
-  }, []);
 
   // helpers for rendering
   const totalsToday = useMemo(() => {
@@ -593,7 +504,6 @@ const Dashboard = () => {
                     onChange={(e) => setSelectedMonth(e.target.value)}
                   >
                     {months.map((m) => (
-                      // replace "No Logs" concept by "Present" label in UI where applicable
                       <option key={m} value={m}>
                         {m}
                       </option>
