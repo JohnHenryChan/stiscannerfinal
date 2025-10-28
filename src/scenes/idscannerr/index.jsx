@@ -481,7 +481,7 @@ const IDScanner = () => {
       }
 
       if (!studentData) {
-        setError("Student not found in cached data.");
+        setError("ID not recognized. Please approach school registrar for details.");
         setIsScanning(false);
         return;
       }
@@ -511,7 +511,7 @@ const IDScanner = () => {
       console.log("[RFID] subjects matched for student:", availableSubjects.map(s => ({ id: s.id, subject: s.subject || s.name, subjectCode: s.subjectCode })));
 
       if (availableSubjects.length === 0) {
-        setError("Student is not enrolled in a subject for this session.");
+        setError("Student is not in any currently active subjects.");
         setIsScanning(false);
         return;
       }
