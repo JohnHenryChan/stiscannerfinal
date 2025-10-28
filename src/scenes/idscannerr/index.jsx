@@ -401,8 +401,9 @@ const IDScanner = () => {
 
       const [startHour, startMin] = (studentData?._subjectStartTime || "00:00").split(":").map(Number);
       const startTime = new Date();
-      startTime.setHours(startHour, startMin + 15, 0, 0);
-      const remark = now > startTime ? "Late" : "Present";
+      startTime.setHours(startHour, startMin, 0, 0);
+      const minutesLate = Math.max(0, Math.floor((now - startTime) / (1000 * 60)));
+      const remark = minutesLate <= 5 ? "Present" : minutesLate <= 15 ? "Late" : "Absent";
 
       const payload = {
         subjectId,
