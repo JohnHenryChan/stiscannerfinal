@@ -1,19 +1,48 @@
 import React, { useState } from 'react';
 import SidebarAdmin from '../global/SidebarAdmin';
 import TopbarAdmin from '../global/TopbarAdmin';
-import { ChevronRightIcon, ChatBubbleBottomCenterTextIcon } from '@heroicons/react/24/outline';
+import { ChevronRightIcon, ChevronDownIcon, ArrowDownTrayIcon, ChatBubbleBottomCenterTextIcon } from '@heroicons/react/24/outline';
 
 const Helps = () => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [openFAQ, setOpenFAQ] = useState(null);
 
-  const helpTopics = [
-    'Syncing attendance across systems',
-    'Managing teacher access rights'
+  // FAQ Section (only the four system FAQs)
+  const faqs = [
+    {
+      question: "Why is a student missing from a class list?",
+      answer:
+        "The registrar might not have updated the enrollment list for that subject yet. Ensure the student is enrolled in the correct subject in the Registrar module.",
+    },
+    {
+      question: "Why are some RFID cards not detected by the system?",
+      answer:
+        "The card might be defective or unregistered. Try rescanning or registering the card again under the student’s profile in the Admin panel.",
+    },
+    {
+      question: "Why does the system show “Face not recognized” for some students?",
+      answer:
+        "Poor lighting or incomplete facial data can cause this issue. Ask the admin to re-register the student’s facial profile under stable lighting.",
+    },
+    {
+      question: "Why are attendance logs not updating in real-time?",
+      answer:
+        "The system depends on an active internet connection. Once reconnected, it automatically syncs offline attendance data.",
+    },
+    {
+      question: "Why does the system load slowly sometimes?",
+      answer:
+        "Internet connection or server response might be slow. Try refreshing the page or checking your connection.",
+    },
+    {
+      question: "Why is the system showing wrong attendance status?",
+      answer:
+        "The student may have scanned the RFID without face verification. Both are required for valid attendance.",
+    },
+    
   ];
 
-  const filteredTopics = helpTopics.filter(topic =>
-    topic.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // Replace this link with your actual PDF handbook URL
+  const handbookUrl = "/student-handbook.pdf";
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -21,36 +50,58 @@ const Helps = () => {
       <div className="flex flex-grow">
         <SidebarAdmin />
 
-        <div className="flex flex-col flex-grow px-8 py-6 bg-white">
-          <h1 className="text-2xl font-semibold mb-4">Help/Support</h1>
+        <div className="flex flex-col flex-grow px-8 py-6 bg-gray-50 overflow-y-auto">
+          <h1 className="text-2xl font-semibold mb-6">Help / Support</h1>
 
-          {/* Help Cards */}
-          <div className="space-y-4 max-w-2xl">
-            {filteredTopics.length > 0 ? (
-              filteredTopics.map((topic, index) => (
+          {/* FAQ Section */}
+          <div className="max-w-2xl mb-10">
+            <h2 className="text-xl font-semibold mb-4 text-[#0057A4]">
+              Frequently Asked Questions
+            </h2>
+            <div className="space-y-3">
+              {faqs.map((faq, index) => (
                 <div
                   key={index}
-                  className="p-4 bg-gray-100 border rounded-md flex items-center justify-between hover:bg-gray-200 cursor-pointer shadow-sm"
+                  className="border rounded-md p-3 bg-white shadow-sm"
                 >
-                  <span className="text-base font-medium">{topic}</span>
-                  <ChevronRightIcon className="w-5 h-5 text-gray-600" />
+                  <button
+                    className="flex justify-between items-center w-full text-left font-medium"
+                    onClick={() => setOpenFAQ(openFAQ === index ? null : index)}
+                  >
+                    {faq.question}
+                    {openFAQ === index ? (
+                      <ChevronDownIcon className="w-5 h-5 text-[#0057A4]" />
+                    ) : (
+                      <ChevronRightIcon className="w-5 h-5 text-[#0057A4]" />
+                    )}
+                  </button>
+                  {openFAQ === index && (
+                    <p className="mt-2 text-gray-600">{faq.answer}</p>
+                  )}
                 </div>
-              ))
-            ) : (
-              <p className="text-gray-500">No help topics found.</p>
-            )}
+              ))}
+            </div>
           </div>
 
-          {/* Help/Support Button at the Bottom */}
-          <div className="mt-auto pt-12 pl-4">
-            <button
-              className="flex items-center space-x-2 px-4 py-2 text-white rounded-md shadow transition"
-              style={{ backgroundColor: '#0057A4' }}
-              onClick={() => alert('Redirecting to Help/Support...')}
+          {/* Student Handbook Section */}
+          <div className="max-w-4xl">
+            <h2 className="text-xl font-semibold mb-3 text-[#0057A4]">
+              Student Handbook
+            </h2>
+            <p className="text-gray-600 mb-3">
+              Click below to open or download the official STI Student Handbook
+              for school rules, policies, and services.
+            </p>
+
+            <a
+              href={handbookUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-[#0057A4] text-white rounded-md shadow hover:bg-[#004080] transition w-fit"
             >
-              <ChatBubbleBottomCenterTextIcon className="w-6 h-6" />
-              <span>Contact Support</span>
-            </button>
+              <ArrowDownTrayIcon className="w-5 h-5" />
+              Download PDF
+            </a>
           </div>
         </div>
       </div>
