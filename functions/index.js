@@ -4,16 +4,16 @@ admin.initializeApp();
 
 
 exports.createInstructorUser = functions.https.onCall(async (data, context) => {
-  const {email, name} = data.data || data || {};
+  const {email, name, password} = data.data || data || {};
 
-  if (!email || !name) {
+  if (!email || !name || !password) {
     throw new functions.https.HttpsError("invalid-argument", "Missing.");
   }
 
   try {
     const userRecord = await admin.auth().createUser({
       email: email.trim(),
-      password: "test123A",
+      password: password.trim(),
       displayName: name.trim(),
     });
 

@@ -291,33 +291,57 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
           console.log("✅ [handleConfirm] Normal update completed (no role change)");
         }
       } else {
+        // CREATE MODE ONLY - Generate 12-digit alphanumeric password
+        const generatePassword = () => {
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+          let password = '';
+          for (let i = 0; i < 12; i++) {
+            password += chars.charAt(Math.floor(Math.random() * chars.length));
+          }
+          return password;
+        };
+
+        const generatedPassword = generatePassword();
+        console.log(`[handleConfirm] Generated 12-digit password for new user ${id}: ${generatedPassword}`);
+
         // Create via callable function, then Firestore doc
         let uid = null;
         try {
+          console.log(`[handleConfirm] Attempting createUserByAdmin with password for ${id}`);
           const createByAdmin = httpsCallable(functions, "createUserByAdmin");
           const resp = await createByAdmin({
             email,
-            password: "TempPass123!",
             displayName: name,
             role: role || "instructor",
             id,
+            password: generatedPassword,
           });
           uid = resp?.data?.uid || resp?.data?.result?.uid || null;
-        } catch {
+          console.log(`[handleConfirm] createUserByAdmin successful for ${id}, uid: ${uid}`);
+        } catch (createByAdminError) {
+          console.log(`[handleConfirm] createUserByAdmin failed for ${id}, trying createInstructorUser:`, createByAdminError);
           const createInstructorUser = httpsCallable(functions, "createInstructorUser");
-          const resp2 = await createInstructorUser({ email, name });
+          const resp2 = await createInstructorUser({ 
+            email, 
+            name,
+            password: generatedPassword 
+          });
           uid = resp2?.data?.uid || null;
+          console.log(`[handleConfirm] createInstructorUser successful for ${id}, uid: ${uid}`);
         }
 
+        console.log(`[handleConfirm] Creating Firestore document for ${id} with password field`);
         await setDoc(doc(db, "instructors", id), {
           id,
           name,
           email,
           uid,
           role,
+          password: generatedPassword,
           mustChangePassword: true,
           subjectList: [], // Ensure new users start with empty subjectList
         });
+        console.log(`[handleConfirm] Firestore document created successfully for ${id}`);
       }
 
       onAdd?.(formData);
