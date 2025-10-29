@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "@date-io/dayjs": "^3.2.0",
+    "@emailjs/browser": "^4.4.1",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
     "@fullcalendar/core": "^6.1.15",

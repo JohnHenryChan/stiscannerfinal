@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { db, functions } from "../firebaseConfig";
 import { doc, getDoc, setDoc, updateDoc, collection, getDocs } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
+import { sendWelcomeEmail } from "../services/emailService"; // Add this import
 
 const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
   const isEdit = Boolean(initialData);
@@ -307,27 +308,18 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
         // Create via callable function, then Firestore doc
         let uid = null;
         try {
-          console.log(`[handleConfirm] Attempting createUserByAdmin with password for ${id}`);
-          const createByAdmin = httpsCallable(functions, "createUserByAdmin");
-          const resp = await createByAdmin({
-            email,
-            displayName: name,
-            role: role || "instructor",
-            id,
-            password: generatedPassword,
-          });
-          uid = resp?.data?.uid || resp?.data?.result?.uid || null;
-          console.log(`[handleConfirm] createUserByAdmin successful for ${id}, uid: ${uid}`);
-        } catch (createByAdminError) {
-          console.log(`[handleConfirm] createUserByAdmin failed for ${id}, trying createInstructorUser:`, createByAdminError);
+          console.log(`[handleConfirm] Creating user with createInstructorUser for ${id}`);
           const createInstructorUser = httpsCallable(functions, "createInstructorUser");
-          const resp2 = await createInstructorUser({ 
+          const resp = await createInstructorUser({ 
             email, 
             name,
             password: generatedPassword 
           });
-          uid = resp2?.data?.uid || null;
+          uid = resp?.data?.uid || null;
           console.log(`[handleConfirm] createInstructorUser successful for ${id}, uid: ${uid}`);
+        } catch (createError) {
+          console.error(`[handleConfirm] createInstructorUser failed for ${id}:`, createError);
+          throw new Error(`Failed to create user account: ${createError.message}`);
         }
 
         console.log(`[handleConfirm] Creating Firestore document for ${id} with password field`);
@@ -342,6 +334,20 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
           subjectList: [], // Ensure new users start with empty subjectList
         });
         console.log(`[handleConfirm] Firestore document created successfully for ${id}`);
+
+        // Send welcome email with credentials using frontend EmailJS
+        try {
+          console.log(`[handleConfirm] Sending welcome email to ${email}`);
+          await sendWelcomeEmail({
+            email,
+            name,
+            password: generatedPassword,
+          });
+          console.log(`✅ [handleConfirm] Welcome email sent successfully to ${email}`);
+        } catch (emailError) {
+          console.warn(`⚠️ [handleConfirm] Failed to send welcome email to ${email}:`, emailError);
+          // Don't fail the entire operation if email fails - user creation still succeeded
+        }
       }
 
       onAdd?.(formData);
