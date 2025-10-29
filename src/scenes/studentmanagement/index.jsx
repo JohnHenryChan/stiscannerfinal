@@ -35,38 +35,86 @@ const StudentManagement = () => {
     fetchStudents();
   }, []);
 
-  // Delete student(s) helper (deletes student doc and attendance docs)
+  // Delete student(s) helper (deletes student doc, attendance docs, and subject subcollection references)
   const performDelete = async (items) => {
     if (!items || items.length === 0) return;
+    
+    console.log("🗑️ [performDelete] Starting deletion for", items.length, "students");
+    
     try {
-      for (const s of items) {
-        // delete attendance docs for this student
+      for (const student of items) {
+        console.log("🗑️ [performDelete] Processing student:", student.id, student.firstName, student.lastName);
+        
+        // 1. Delete attendance docs for this student
         try {
-          const attQ = query(collection(db, "attendance"), where("studentId", "==", s.id));
+          console.log("📊 [performDelete] Deleting attendance records for student:", student.id);
+          const attQ = query(collection(db, "attendance"), where("studentId", "==", student.id));
           const attSnap = await getDocs(attQ);
-          for (const ad of attSnap.docs) {
-            await deleteDoc(doc(db, "attendance", ad.id));
+          console.log("📊 [performDelete] Found", attSnap.docs.length, "attendance records");
+          
+          for (const attDoc of attSnap.docs) {
+            await deleteDoc(doc(db, "attendance", attDoc.id));
+            console.log("✅ [performDelete] Deleted attendance record:", attDoc.id);
           }
         } catch (e) {
-          console.warn("Failed to delete attendance for", s.id, e);
+          console.warn("⚠️ [performDelete] Failed to delete attendance for", student.id, e);
         }
 
-        // delete student doc
+        // 2. Delete student references from ALL subject subcollections
         try {
-          await deleteDoc(doc(db, "students", s.id));
+          console.log("📚 [performDelete] Removing student from subject subcollections:", student.id);
+          
+          // Get all subjects
+          const subjectsSnapshot = await getDocs(collection(db, "subjectList"));
+          console.log("📚 [performDelete] Found", subjectsSnapshot.docs.length, "subjects to check");
+          
+          for (const subjectDoc of subjectsSnapshot.docs) {
+            const subjectId = subjectDoc.id;
+            
+            // Check if student exists in this subject's students subcollection
+            const studentInSubjectRef = doc(db, "subjectList", subjectId, "students", student.id);
+            
+            try {
+              // Try to delete the student document from this subject
+              await deleteDoc(studentInSubjectRef);
+              console.log(`✅ [performDelete] Removed student ${student.id} from subject ${subjectId}`);
+            } catch (deleteError) {
+              // Student likely doesn't exist in this subject - this is fine
+              if (deleteError.code === 'not-found') {
+                console.log(`ℹ️ [performDelete] Student ${student.id} not found in subject ${subjectId} (normal)`);
+              } else {
+                console.warn(`⚠️ [performDelete] Error removing student ${student.id} from subject ${subjectId}:`, deleteError);
+              }
+            }
+          }
         } catch (e) {
-          console.warn("Failed to delete student doc", s.id, e);
+          console.error("🔥 [performDelete] Failed to remove student from subject subcollections:", student.id, e);
         }
+
+        // 3. Delete main student document
+        try {
+          console.log("👤 [performDelete] Deleting main student document:", student.id);
+          await deleteDoc(doc(db, "students", student.id));
+          console.log("✅ [performDelete] Deleted main student document:", student.id);
+        } catch (e) {
+          console.warn("⚠️ [performDelete] Failed to delete student doc", student.id, e);
+        }
+        
+        console.log("🎯 [performDelete] Completed deletion for student:", student.id);
       }
 
-      // update local state
-      const ids = new Set(items.map(i => i.id));
-      setStudents(prev => prev.filter(s => !ids.has(s.id)));
-      // clear selection
+      // Update local state
+      const deletedIds = new Set(items.map(item => item.id));
+      setStudents(prev => prev.filter(s => !deletedIds.has(s.id)));
+      
+      // Clear selection
       setSelectedIds(new Set());
       setSelectAll(false);
+      
+      console.log("✅ [performDelete] Successfully deleted", items.length, "students and updated UI");
+      
     } catch (err) {
-      console.error("performDelete error", err);
+      console.error("🔥 [performDelete] Critical error during deletion:", err);
     } finally {
       setConfirmVisible(false);
       setConfirmItems([]);

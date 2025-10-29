@@ -103,6 +103,105 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
     }
   };
 
+  // Clear subjectList when role changes from instructor to something else
+  const handleRoleChange = async (instructorData, newRole) => {
+    const currentRole = instructorData.role || "instructor";
+    const instructorId = instructorData.id;
+    
+    console.log(`[RoleChange] User ${instructorId} role changing from '${currentRole}' to '${newRole}'`);
+    
+    // If changing FROM instructor TO something else, clear their subjectList
+    if (currentRole === "instructor" && newRole !== "instructor") {
+      console.log(`[RoleChange] Clearing subjectList for ${instructorId} (${instructorData.name}) - no longer instructor`);
+      
+      try {
+        // Get current instructor document to check existing subjectList
+        const instructorRef = doc(db, "instructors", instructorId);
+        const instructorDoc = await getDoc(instructorRef);
+        
+        if (instructorDoc.exists()) {
+          const currentData = instructorDoc.data();
+          const currentSubjectList = currentData.subjectList || [];
+          
+          console.log(`[RoleChange] Current subjectList for ${instructorId}:`, currentSubjectList);
+          
+          if (currentSubjectList.length > 0) {
+            // Clear subjectList and update role
+            await updateDoc(instructorRef, {
+              role: newRole,
+              subjectList: [], // Clear the array
+              lastRoleChange: new Date(),
+              previousRole: currentRole
+            });
+            
+            console.log(`✅ [RoleChange] Cleared subjectList for ${instructorId} - removed ${currentSubjectList.length} subjects`);
+            
+            // Optional: Also remove instructor assignment from affected subjects
+            for (const subjectId of currentSubjectList) {
+              try {
+                const subjectRef = doc(db, "subjectList", subjectId);
+                const subjectDoc = await getDoc(subjectRef);
+                
+                if (subjectDoc.exists()) {
+                  const subjectData = subjectDoc.data();
+                  
+                  // If this instructor was assigned to this subject, remove the assignment
+                  if (subjectData.assignedInstructor === instructorId) {
+                    await updateDoc(subjectRef, {
+                      assignedInstructor: null,
+                      lastInstructorChange: new Date(),
+                      previousInstructor: instructorId
+                    });
+                    
+                    console.log(`✅ [RoleChange] Removed instructor assignment from subject ${subjectId}`);
+                  }
+                }
+              } catch (subjectError) {
+                console.warn(`⚠️ [RoleChange] Failed to update subject ${subjectId}:`, subjectError);
+              }
+            }
+            
+            return true; // Indicates we handled the role change specially
+          } else {
+            // Just update the role (no subjects to clear)
+            await updateDoc(instructorRef, {
+              role: newRole,
+              lastRoleChange: new Date(),
+              previousRole: currentRole
+            });
+            
+            console.log(`✅ [RoleChange] Updated role for ${instructorId} (no subjects to clear)`);
+            return true;
+          }
+        }
+      } catch (error) {
+        console.error(`🔥 [RoleChange] Failed to clear subjectList for ${instructorId}:`, error);
+        throw error;
+      }
+    } else if (newRole === "instructor" && currentRole !== "instructor") {
+      // Changing TO instructor - just update role (they can be assigned subjects later)
+      console.log(`[RoleChange] User ${instructorId} becoming instructor - keeping empty subjectList`);
+      
+      try {
+        await updateDoc(doc(db, "instructors", instructorId), {
+          role: newRole,
+          subjectList: [], // Ensure clean slate for new instructor
+          lastRoleChange: new Date(),
+          previousRole: currentRole
+        });
+        
+        console.log(`✅ [RoleChange] Updated ${instructorId} to instructor role`);
+        return true;
+      } catch (error) {
+        console.error(`🔥 [RoleChange] Failed to update role for ${instructorId}:`, error);
+        throw error;
+      }
+    }
+    
+    // Return false if we didn't handle the role change specially
+    return false;
+  };
+
   const buildChangedFields = () => {
     if (!isEdit) return [];
     const changes = [];
@@ -169,8 +268,28 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
 
     try {
       if (isEdit) {
-        // Update Firestore only on edit (no Functions)
-        await updateDoc(doc(db, "instructors", id), { name, role, email });
+        // Check if role is changing and handle it specially
+        const roleChanged = initialData?.role !== role;
+        
+        if (roleChanged) {
+          console.log(`[handleConfirm] Detected role change for ${id}: ${initialData?.role} -> ${role}`);
+          
+          // Use special role change handler
+          const handled = await handleRoleChange(initialData, role);
+          
+          if (handled) {
+            console.log("✅ [handleConfirm] Role change completed with special handling");
+            // Role change handler already updated the document
+          } else {
+            // Fallback to normal update if role change wasn't handled specially
+            await updateDoc(doc(db, "instructors", id), { name, role, email });
+            console.log("✅ [handleConfirm] Normal role update completed");
+          }
+        } else {
+          // No role change - normal update
+          await updateDoc(doc(db, "instructors", id), { name, role, email });
+          console.log("✅ [handleConfirm] Normal update completed (no role change)");
+        }
       } else {
         // Create via callable function, then Firestore doc
         let uid = null;
@@ -197,6 +316,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
           uid,
           role,
           mustChangePassword: true,
+          subjectList: [], // Ensure new users start with empty subjectList
         });
       }
 
@@ -205,6 +325,7 @@ const AddInstructor = ({ onClose, onAdd, initialData, visible = true }) => {
       onClose?.();
     } catch (err) {
       setError(err?.message || "Failed to save.");
+      console.error("🔥 [handleConfirm] Error:", err);
     } finally {
       setLoading(false);
     }
