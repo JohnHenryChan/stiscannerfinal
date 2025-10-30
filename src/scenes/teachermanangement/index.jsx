@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { MdSearch } from "react-icons/md";
-import { FaTrash, FaPen } from "react-icons/fa";
+import { FaTrash, FaPen, FaKey } from "react-icons/fa"; // Added FaKey for password reset
 import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import AddInstructor from "../../components/AddInstructor";
-// import EditSubjectListModal from "../../components/EditSubjectListModal"; // removed
-// import ConfirmModal from "../../components/ConfirmModal"; // removed: use local modal declared here
 import { db, functions } from "../../firebaseConfig";
 import {
   collection,
@@ -72,6 +70,62 @@ const LocalConfirmModal = ({
   );
 };
 
+// Password Reset Modal
+const PasswordResetModal = ({
+  visible,
+  instructor,
+  onClose,
+  onConfirm,
+  isResetting = false
+}) => {
+  if (!visible) return null;
+
+  const baseBtn = "px-4 py-2 rounded";
+  const disableUX = "opacity-60 cursor-not-allowed pointer-events-none";
+  const cancelEnabled = `${baseBtn} border border-gray-300 text-gray-700 hover:bg-gray-100`;
+  const cancelDisabledStyles = `${baseBtn} border border-gray-200 text-gray-400 bg-gray-100 ${disableUX}`;
+  const confirmEnabled = `${baseBtn} bg-blue-600 text-white hover:bg-blue-700`;
+  const confirmDisabledStyles = `${baseBtn} bg-gray-300 text-gray-600 ${disableUX}`;
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+      <div className="bg-white rounded-md shadow-lg w-full max-w-md p-6">
+        <h3 className="text-lg font-semibold mb-2">Send Password Reset</h3>
+        <div className="text-sm text-gray-600 mb-6">
+          <p className="mb-2">Generate and send a password reset link to:</p>
+          <div className="bg-gray-50 p-3 rounded border">
+            <p><strong>Name:</strong> {instructor?.name || "Unknown"}</p>
+            <p><strong>Email:</strong> {instructor?.email || "No email"}</p>
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            A secure password reset link will be generated and can be sent via email.
+          </p>
+        </div>
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={isResetting}
+            aria-disabled={isResetting}
+            className={isResetting ? cancelDisabledStyles : cancelEnabled}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isResetting || !instructor?.email}
+            aria-disabled={isResetting || !instructor?.email}
+            className={isResetting || !instructor?.email ? confirmDisabledStyles : confirmEnabled}
+          >
+            {isResetting ? "Generating..." : "Generate Reset Link"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const InstructorManagement = () => {
   const { user } = useAuth();
   const role = user?.role || "unknown";
@@ -85,6 +139,11 @@ const InstructorManagement = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [instructorToDelete, setInstructorToDelete] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Password reset state
+  const [isPasswordResetModalOpen, setIsPasswordResetModalOpen] = useState(false);
+  const [instructorForPasswordReset, setInstructorForPasswordReset] = useState(null);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
 
   // Fetch instructors
   useEffect(() => {
@@ -116,6 +175,71 @@ const InstructorManagement = () => {
   const handleDelete = (index) => {
     setInstructorToDelete(instructors[index]);
     setIsDeleteModalOpen(true);
+  };
+
+  // Password Reset Functions
+  const handlePasswordReset = (index) => {
+    setInstructorForPasswordReset(instructors[index]);
+    setIsPasswordResetModalOpen(true);
+  };
+
+  const cancelPasswordReset = () => {
+    setIsPasswordResetModalOpen(false);
+    setInstructorForPasswordReset(null);
+    setIsResettingPassword(false);
+  };
+
+  const confirmPasswordReset = async () => {
+    if (!instructorForPasswordReset?.email) {
+      console.error("[PasswordReset] No email found for instructor");
+      return;
+    }
+
+    setIsResettingPassword(true);
+    const { email, name, id } = instructorForPasswordReset;
+
+    console.log(`[PasswordReset] Generating reset link for ${email} (${name})`);
+
+    try {
+      // Call the Cloud Function to generate password reset link
+      const generatePWResetLink = httpsCallable(functions, "generatePWResetLink");
+      const result = await generatePWResetLink({ email });
+
+      console.log("[PasswordReset] Reset link generated successfully:", result.data);
+
+      // Here you can integrate with EmailJS or show the link to admin
+      const resetLink = result.data.resetLink;
+      
+      // Option 1: Copy to clipboard
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(resetLink);
+        alert(`Password reset link generated and copied to clipboard!\n\nFor: ${name} (${email})\n\nYou can now send this link via email.`);
+      } else {
+        // Option 2: Show in alert/modal if clipboard not available
+        alert(`Password reset link generated for ${name}:\n\n${resetLink}\n\nPlease copy this link and send it to the instructor.`);
+      }
+
+      // Option 3: Here you could integrate with EmailJS to send automatically
+      // await sendPasswordResetEmail({ email, name, resetLink });
+
+      console.log("[PasswordReset] Process completed successfully");
+
+    } catch (error) {
+      console.error("[PasswordReset] Failed to generate reset link:", error);
+      
+      let errorMessage = "Failed to generate password reset link.";
+      if (error.code === "functions/not-found") {
+        errorMessage = "No user found with this email address.";
+      } else if (error.code === "functions/invalid-argument") {
+        errorMessage = "Invalid email address format.";
+      }
+      
+      alert(`Error: ${errorMessage}`);
+    } finally {
+      setIsResettingPassword(false);
+      setIsPasswordResetModalOpen(false);
+      setInstructorForPasswordReset(null);
+    }
   };
 
   // Cancel: just close modal (no safe-restore logic)
@@ -224,10 +348,27 @@ const InstructorManagement = () => {
                     <td className="py-2 px-4 border">{inst.email || "—"}</td>
                     <td className="py-2 px-4 border">
                       <div className="flex justify-center gap-4">
-                        <button onClick={() => handleEdit(index)}>
+                        <button 
+                          onClick={() => handleEdit(index)}
+                          title="Edit User"
+                        >
                           <FaPen className="text-black hover:text-blue-600 cursor-pointer" />
                         </button>
-                        <button onClick={() => handleDelete(index)}>
+                        <button 
+                          onClick={() => handlePasswordReset(index)}
+                          title="Generate Password Reset Link"
+                          disabled={!inst.email}
+                        >
+                          <FaKey className={`cursor-pointer ${
+                            inst.email 
+                              ? "text-green-600 hover:text-green-800" 
+                              : "text-gray-400 cursor-not-allowed"
+                          }`} />
+                        </button>
+                        <button 
+                          onClick={() => handleDelete(index)}
+                          title="Delete User"
+                        >
                           <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" />
                         </button>
                       </div>
@@ -257,8 +398,6 @@ const InstructorManagement = () => {
             initialData={editingData}
           />
 
-          {/* removed: EditSubjectListModal */}
-
           <LocalConfirmModal
             visible={isDeleteModalOpen}
             title="Confirm Deletion"
@@ -267,6 +406,14 @@ const InstructorManagement = () => {
             onCancel={cancelDelete}
             confirmDisabled={isDeleting}
             confirmText={isDeleting ? "Deleting..." : "Confirm"}
+          />
+
+          <PasswordResetModal
+            visible={isPasswordResetModalOpen}
+            instructor={instructorForPasswordReset}
+            onClose={cancelPasswordReset}
+            onConfirm={confirmPasswordReset}
+            isResetting={isResettingPassword}
           />
         </div>
       </div>

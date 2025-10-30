@@ -47,14 +47,20 @@ exports.deleteUserByUid = functions.https.onCall(async (data, context) => {
 
 // Generate password reset link for instructors only
 exports.generatePWResetLink = functions.https.onCall(async (data, context) => {
-  const {email} = data;
+  // ✅ FIX: Use consistent parameter access pattern like other functions
+  const {email} = data.data || data || {};
+
+  console.log("📧 [generatePWResetLink] Received data:", data);
+  console.log("📧 [generatePWResetLink] Extracted email:", email);
 
   if (!email) {
+    console.error("📧 [generatePWResetLink] No email provided");
     throw new functions.https.HttpsError("Email is required");
   }
 
   try {
     // Generate the password reset link
+    console.log("📧 [generatePWResetLink] Generating reset link for:", email);
     const resetLink = await admin.auth().generatePasswordResetLink(email);
 
     console.log("✅ Generated password reset link for instructor:", email);
@@ -66,10 +72,11 @@ exports.generatePWResetLink = functions.https.onCall(async (data, context) => {
   } catch (err) {
     console.error("🔥 Error generating password reset link:", err);
 
+
     if (err.code === "auth/user-not-found") {
       throw new functions.https.HttpsError("No user with this email address");
-    } else if (err.code ==="auth/invalid-email") {
-      throw new functions.https.HttpsError("invalid-argument");
+    } else if (err.code === "auth/invalid-email") {
+      throw new functions.https.HttpsError("Invalid email address format");
     } else {
       throw new functions.https.HttpsError("internal", err.message);
     }
