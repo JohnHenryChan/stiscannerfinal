@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { MdSearch } from "react-icons/md";
-import { FaTrash, FaPen, FaKey } from "react-icons/fa"; // Added FaKey for password reset
+import { FaTrash, FaPen, FaKey, FaCheckCircle, FaTimesCircle } from "react-icons/fa"; // Added icons for success/error
 import SidebarAdmin from "../global/SidebarAdmin";
 import TopbarAdmin from "../global/TopbarAdmin";
 import AddInstructor from "../../components/AddInstructor";
@@ -17,9 +17,7 @@ import {
 import { httpsCallable } from "firebase/functions";
 import { useAuth } from "../../context/AuthContext";
 import AccessDenied from "../../components/AccessDenied";
-
-// NOTE: instructor.id = Firestore doc id (instructors/{id})
-//       instructor.uid = Firebase Auth UID (used by Cloud Function)
+import { sendPasswordResetEmail } from "../../services/emailService";
 
 // Local confirm modal (disable BOTH buttons while deleting)
 const LocalConfirmModal = ({
@@ -84,21 +82,21 @@ const PasswordResetModal = ({
   const disableUX = "opacity-60 cursor-not-allowed pointer-events-none";
   const cancelEnabled = `${baseBtn} border border-gray-300 text-gray-700 hover:bg-gray-100`;
   const cancelDisabledStyles = `${baseBtn} border border-gray-200 text-gray-400 bg-gray-100 ${disableUX}`;
-  const confirmEnabled = `${baseBtn} bg-blue-600 text-white hover:bg-blue-700`;
+  const confirmEnabled = `${baseBtn} bg-blue-700 text-white hover:bg-blue-800`;
   const confirmDisabledStyles = `${baseBtn} bg-gray-300 text-gray-600 ${disableUX}`;
 
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
       <div className="bg-white rounded-md shadow-lg w-full max-w-md p-6">
-        <h3 className="text-lg font-semibold mb-2">Send Password Reset</h3>
+        <h3 className="text-lg font-semibold mb-2">Send Password Reset Email</h3>
         <div className="text-sm text-gray-600 mb-6">
-          <p className="mb-2">Generate and send a password reset link to:</p>
+          <p className="mb-2">Send a password reset email to:</p>
           <div className="bg-gray-50 p-3 rounded border">
             <p><strong>Name:</strong> {instructor?.name || "Unknown"}</p>
             <p><strong>Email:</strong> {instructor?.email || "No email"}</p>
           </div>
           <p className="mt-2 text-xs text-gray-500">
-            A secure password reset link will be generated and can be sent via email.
+            A secure password reset link will be generated and sent via email.
           </p>
         </div>
         <div className="flex justify-end gap-3">
@@ -118,7 +116,48 @@ const PasswordResetModal = ({
             aria-disabled={isResetting || !instructor?.email}
             className={isResetting || !instructor?.email ? confirmDisabledStyles : confirmEnabled}
           >
-            {isResetting ? "Generating..." : "Generate Reset Link"}
+            {isResetting ? "Sending..." : "Send Reset Email"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Success/Error Notification Modal
+const NotificationModal = ({
+  visible,
+  type = "success", // "success" or "error"
+  title,
+  message,
+  onClose
+}) => {
+  if (!visible) return null;
+
+  const isSuccess = type === "success";
+  const icon = isSuccess ? (
+    <FaCheckCircle className="text-green-500 text-3xl mb-3" />
+  ) : (
+    <FaTimesCircle className="text-red-500 text-3xl mb-3" />
+  );
+  
+  const bgColor = isSuccess ? "bg-green-50" : "bg-red-50";
+  const borderColor = isSuccess ? "border-green-200" : "border-red-200";
+  const buttonColor = isSuccess ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700";
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+      <div className="bg-white rounded-md shadow-lg w-full max-w-md p-6">
+        <div className={`${bgColor} ${borderColor} border rounded-md p-4 text-center`}>
+          {icon}
+          <h3 className="text-lg font-semibold mb-2">{title}</h3>
+          <p className="text-sm text-gray-600 mb-4">{message}</p>
+          <button
+            type="button"
+            onClick={onClose}
+            className={`px-6 py-2 rounded text-white ${buttonColor} transition-colors`}
+          >
+            OK
           </button>
         </div>
       </div>
@@ -144,6 +183,14 @@ const InstructorManagement = () => {
   const [isPasswordResetModalOpen, setIsPasswordResetModalOpen] = useState(false);
   const [instructorForPasswordReset, setInstructorForPasswordReset] = useState(null);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
+
+  // Notification modal state
+  const [notificationModal, setNotificationModal] = useState({
+    visible: false,
+    type: "success",
+    title: "",
+    message: ""
+  });
 
   // Fetch instructors
   useEffect(() => {
@@ -189,6 +236,24 @@ const InstructorManagement = () => {
     setIsResettingPassword(false);
   };
 
+  const showNotification = (type, title, message) => {
+    setNotificationModal({
+      visible: true,
+      type,
+      title,
+      message
+    });
+  };
+
+  const closeNotification = () => {
+    setNotificationModal({
+      visible: false,
+      type: "success",
+      title: "",
+      message: ""
+    });
+  };
+
   const confirmPasswordReset = async () => {
     if (!instructorForPasswordReset?.email) {
       console.error("[PasswordReset] No email found for instructor");
@@ -198,43 +263,57 @@ const InstructorManagement = () => {
     setIsResettingPassword(true);
     const { email, name, id } = instructorForPasswordReset;
 
-    console.log(`[PasswordReset] Generating reset link for ${email} (${name})`);
+    console.log(`[PasswordReset] Generating reset link and sending email to ${email} (${name})`);
 
     try {
-      // Call the Cloud Function to generate password reset link
+      // Step 1: Generate password reset link via Cloud Function
       const generatePWResetLink = httpsCallable(functions, "generatePWResetLink");
       const result = await generatePWResetLink({ email });
 
       console.log("[PasswordReset] Reset link generated successfully:", result.data);
-
-      // Here you can integrate with EmailJS or show the link to admin
       const resetLink = result.data.resetLink;
       
-      // Option 1: Copy to clipboard
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(resetLink);
-        alert(`Password reset link generated and copied to clipboard!\n\nFor: ${name} (${email})\n\nYou can now send this link via email.`);
-      } else {
-        // Option 2: Show in alert/modal if clipboard not available
-        alert(`Password reset link generated for ${name}:\n\n${resetLink}\n\nPlease copy this link and send it to the instructor.`);
-      }
+      // Step 2: Send email using EmailJS
+      console.log("[PasswordReset] Sending password reset email...");
+      
+      await sendPasswordResetEmail({
+        email: email,
+        name: name,
+        resetLink: resetLink
+      });
+      
+      console.log("[PasswordReset] Email sent successfully");
+      console.log(`✅ Password reset email sent to ${name} (${email})`);
 
-      // Option 3: Here you could integrate with EmailJS to send automatically
-      // await sendPasswordResetEmail({ email, name, resetLink });
-
-      console.log("[PasswordReset] Process completed successfully");
+      // Show success notification instead of alert
+      showNotification(
+        "success",
+        "Email Sent Successfully!",
+        `Password reset email has been sent to ${name} at ${email}. The instructor will receive the reset link via email.`
+      );
 
     } catch (error) {
-      console.error("[PasswordReset] Failed to generate reset link:", error);
+      console.error("[PasswordReset] Process failed:", error);
       
-      let errorMessage = "Failed to generate password reset link.";
+      let errorMessage = "Failed to send password reset email.";
+      
+      // Handle Cloud Function errors
       if (error.code === "functions/not-found") {
         errorMessage = "No user found with this email address.";
       } else if (error.code === "functions/invalid-argument") {
         errorMessage = "Invalid email address format.";
+      } else if (error.message?.includes("Email sending failed")) {
+        errorMessage = "Password reset link generated but email delivery failed. Please try again.";
       }
       
-      alert(`Error: ${errorMessage}`);
+      console.error(`❌ Password reset failed: ${errorMessage}`);
+
+      // Show error notification instead of alert
+      showNotification(
+        "error",
+        "Email Failed",
+        errorMessage
+      );
     } finally {
       setIsResettingPassword(false);
       setIsPasswordResetModalOpen(false);
@@ -356,7 +435,7 @@ const InstructorManagement = () => {
                         </button>
                         <button 
                           onClick={() => handlePasswordReset(index)}
-                          title="Generate Password Reset Link"
+                          title="Send Password Reset Email"
                           disabled={!inst.email}
                         >
                           <FaKey className={`cursor-pointer ${
@@ -414,6 +493,14 @@ const InstructorManagement = () => {
             onClose={cancelPasswordReset}
             onConfirm={confirmPasswordReset}
             isResetting={isResettingPassword}
+          />
+
+          <NotificationModal
+            visible={notificationModal.visible}
+            type={notificationModal.type}
+            title={notificationModal.title}
+            message={notificationModal.message}
+            onClose={closeNotification}
           />
         </div>
       </div>
