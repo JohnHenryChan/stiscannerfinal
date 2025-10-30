@@ -2,7 +2,6 @@ const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 admin.initializeApp();
 
-
 exports.createInstructorUser = functions.https.onCall(async (data, context) => {
   const {email, name, password} = data.data || data || {};
 
@@ -43,5 +42,36 @@ exports.deleteUserByUid = functions.https.onCall(async (data, context) => {
   } catch (err) {
     console.error("🔥 Error deleting auth user:", err);
     throw new functions.https.HttpsError("internal", err.message);
+  }
+});
+
+// Generate password reset link for instructors only
+exports.generatePWResetLink = functions.https.onCall(async (data, context) => {
+  const {email} = data;
+
+  if (!email) {
+    throw new functions.https.HttpsError("Email is required");
+  }
+
+  try {
+    // Generate the password reset link
+    const resetLink = await admin.auth().generatePasswordResetLink(email);
+
+    console.log("✅ Generated password reset link for instructor:", email);
+    return {
+      success: true,
+      resetLink: resetLink,
+      email: email,
+    };
+  } catch (err) {
+    console.error("🔥 Error generating password reset link:", err);
+
+    if (err.code === "auth/user-not-found") {
+      throw new functions.https.HttpsError("No user with this email address");
+    } else if (err.code ==="auth/invalid-email") {
+      throw new functions.https.HttpsError("invalid-argument");
+    } else {
+      throw new functions.https.HttpsError("internal", err.message);
+    }
   }
 });

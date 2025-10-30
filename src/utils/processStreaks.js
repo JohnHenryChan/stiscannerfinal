@@ -43,6 +43,7 @@ const normDays = (days) =>
  * - Per-subject streaks are stored in subjectList/{subjectId}/students/{studentId}
  * - Global streak stored at students/{sid}/streaks/global
  * - Global increments only if student had >=1 scheduled, active class and attended none that day.
+ * - Streaks reset to 0 after reaching 3 (instead of continuing to count)
  */
 export async function processStreaksFromLastRun(currentUserId) {
   console.log("🔢 [processStreaks] Starting streak processing for user:", currentUserId);
@@ -187,7 +188,22 @@ export async function processStreaksFromLastRun(currentUserId) {
           const subjStudentSnap = rosterSnap.docs.find((d) => d.id === studentId);
           const prev = subjStudentSnap?.data() || {};
           const prevStreak = Number(prev.streak || 0);
-          const nextStreak = status === "Absent" ? prevStreak + 1 : 0;
+          
+          // ✨ NEW LOGIC: Reset to 0 after reaching 3
+          let nextStreak;
+          if (status === "Absent") {
+            if (prevStreak >= 3) {
+              // If already at 3 or more, reset to 1 (this absence starts a new streak)
+              nextStreak = 1;
+              console.log("🔄 [processStreaks] Resetting streak after 3+ for", studentId, ":", prevStreak, "-> 1");
+            } else {
+              // Normal increment
+              nextStreak = prevStreak + 1;
+            }
+          } else {
+            // Present or Late - reset to 0
+            nextStreak = 0;
+          }
 
           console.log("🔢 [processStreaks] Subject streak for", studentId, ":", prevStreak, "->", nextStreak);
 
@@ -197,12 +213,16 @@ export async function processStreaksFromLastRun(currentUserId) {
             lastStatus: status,
             lastDate: day,
             updatedAt: serverTimestamp(),
+            // Only trigger notification when reaching exactly 3 (not when resetting from 3+)
             ...(nextStreak === 3 && !prev.triggeredAt3 ? { triggeredAt3: serverTimestamp() } : {}),
+            // Clear triggered flag when streak resets
+            ...(nextStreak === 0 ? { triggeredAt3: null } : {}),
           };
 
           batch.set(subjStudentRef, subjUpdate, { merge: true });
           ops++;
 
+          // Create notification only when reaching exactly 3
           if (nextStreak === 3 && !prev.triggeredAt3) {
             console.log("🚨 [processStreaks] Subject streak hit 3! Creating notification for", studentId, "in", subjectId);
             const notifRef = doc(collection(db, "notifications"));
@@ -244,7 +264,23 @@ export async function processStreaksFromLastRun(currentUserId) {
         const gSnap = await getDoc(gRef);
         const gPrev = gSnap.exists() ? (gSnap.data() || {}) : {};
         const gPrevStreak = Number(gPrev.streak || 0);
-        const next = attendedAny ? 0 : gPrevStreak + 1;
+        
+        // ✨ NEW LOGIC: Reset global streak to 0 after reaching 3
+        let next;
+        if (attendedAny) {
+          // Student attended at least one class - reset streak
+          next = 0;
+        } else {
+          // Student missed all classes
+          if (gPrevStreak >= 3) {
+            // If already at 3 or more, reset to 1 (this absence starts a new streak)
+            next = 1;
+            console.log("🔄 [processStreaks] Resetting global streak after 3+ for", studentId, ":", gPrevStreak, "-> 1");
+          } else {
+            // Normal increment
+            next = gPrevStreak + 1;
+          }
+        }
 
         console.log("🌍 [processStreaks] Global streak for", studentId, ":", gPrevStreak, "->", next);
 
@@ -253,11 +289,15 @@ export async function processStreaksFromLastRun(currentUserId) {
           lastStatusDay: attendedAny ? "NonAbsent" : "Absent",
           lastDate: day,
           updatedAt: serverTimestamp(),
+          // Only trigger notification when reaching exactly 3
           ...(next === 3 && !gPrev.triggeredAt3 ? { triggeredAt3: serverTimestamp() } : {}),
+          // Clear triggered flag when streak resets
+          ...(next === 0 ? { triggeredAt3: null } : {}),
         };
         batch.set(gRef, gUpdate, { merge: true });
         ops++;
 
+        // Create notification only when reaching exactly 3
         if (next === 3 && !gPrev.triggeredAt3) {
           console.log("🚨 [processStreaks] Global streak hit 3! Creating notification for", studentId);
           const notifRef = doc(collection(db, "notifications"));

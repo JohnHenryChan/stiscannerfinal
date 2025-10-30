@@ -30,6 +30,183 @@ import { processStreaksFromLastRun } from "../../utils/processStreaks";
 // dry-run: when true only logs planned writes (no writes to attendance/config)
 const WRITE_ABSENCE_DRY_RUN = false;
 
+// helper: format local YYYY-MM-DD
+const formatDateLocal = (d) => {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+// helper: inclusive date iterator
+const iterateDatesInclusive = function* (startDate, endDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  const cur = new Date(start);
+  
+  while (cur <= end) {
+    yield new Date(cur);
+    cur.setDate(cur.getDate() + 1);
+  }
+};
+
+// Use AttendanceRecord logic for writing absence documents
+const writeAbsenceDocumentsAttendanceRecord = async (fromDate, toDate) => {
+  console.log(`📝 [WriteAbsence] Starting absence document creation from ${formatDateLocal(fromDate)} to ${formatDateLocal(toDate)}`);
+  
+  try {
+    // Get all subjects (no role filtering)
+    const subsSnap = await getDocs(collection(db, "subjectList"));
+    const subjects = [];
+    
+    subsSnap.forEach(doc => {
+      const data = doc.data();
+      subjects.push({ id: doc.id, ...data });
+    });
+    
+    console.log(`📝 [WriteAbsence] Processing ${subjects.length} subjects`);
+    
+    let totalAbsencesWritten = 0;
+    const datesToProcess = Array.from(iterateDatesInclusive(fromDate, toDate));
+    
+    console.log(`📝 [WriteAbsence] Processing ${datesToProcess.length} dates`);
+    
+    for (const dateObj of datesToProcess) {
+      const dateStr = formatDateLocal(dateObj);
+      const weekday = dateObj.toLocaleDateString("en-US", { weekday: "short" });
+      
+      console.log(`📝 [WriteAbsence] Processing date: ${dateStr} (${weekday})`);
+      
+      // ✅ CREATE/UPDATE THE PARENT DATE DOCUMENT FIRST
+      const dateDocRef = doc(db, "attendance", dateStr);
+      const dateDocData = {
+        date: dateStr,                          // Date field in YYYY-MM-DD format
+        dayOfWeek: weekday,                     // "Mon", "Tue", etc.
+        timestamp: new Date(),                  // When this date document was created/updated
+        processed: true,                        // Mark as processed
+        processedBy: "system",                  // Who processed it
+        lastUpdated: new Date(),                // Last update timestamp
+        year: dateObj.getFullYear(),            // 2024
+        month: dateObj.getMonth() + 1,          // 10 (October)
+        day: dateObj.getDate()                  // 30
+      };
+      
+      if (!WRITE_ABSENCE_DRY_RUN) {
+        await setDoc(dateDocRef, dateDocData, { merge: true });
+        console.log(`📅 [WriteAbsence] Created/updated parent date document: attendance/${dateStr}`);
+      } else {
+        console.log(`🧪 [WriteAbsence] DRY RUN: Would create/update parent date doc: attendance/${dateStr}`);
+      }
+      
+      // Filter subjects by weekday
+      const subjectsForDate = subjects.filter(s => {
+        const isActive = s.active !== false;
+        const hasDays = Array.isArray(s.days) && s.days.length > 0;
+        const matchesDay = hasDays && s.days.includes(weekday);
+        
+        console.log(`📝 [WriteAbsence] Subject ${s.id}: active=${isActive}, hasDays=${hasDays}, matchesDay=${matchesDay}, days=${JSON.stringify(s.days)}`);
+        
+        return isActive && hasDays && matchesDay;
+      });
+      
+      console.log(`📝 [WriteAbsence] Found ${subjectsForDate.length} subjects scheduled for ${weekday}`);
+      
+      for (const subject of subjectsForDate) {
+        try {
+          console.log(`📝 [WriteAbsence] Processing subject: ${subject.id} (${subject.subject || subject.name})`);
+          
+          // Get enrolled students for this subject
+          const studentsSnap = await getDocs(collection(db, "subjectList", subject.id, "students"));
+          const enrolledStudents = [];
+          
+          studentsSnap.forEach(doc => {
+            enrolledStudents.push({
+              id: doc.id,
+              ...doc.data()
+            });
+          });
+          
+          console.log(`📝 [WriteAbsence] Found ${enrolledStudents.length} enrolled students in ${subject.id}`);
+          
+          // Check existing attendance records for this date/subject
+          const attendanceSnap = await getDocs(collection(db, "attendance", dateStr, subject.id));
+          const existingAttendance = new Set();
+          
+          attendanceSnap.forEach(doc => {
+            existingAttendance.add(doc.id);
+          });
+          
+          console.log(`📝 [WriteAbsence] Found ${existingAttendance.size} existing attendance records for ${dateStr}/${subject.id}`);
+          
+          // Find students without attendance records
+          const absentStudents = enrolledStudents.filter(student => 
+            !existingAttendance.has(student.id)
+          );
+          
+          console.log(`📝 [WriteAbsence] Found ${absentStudents.length} students to mark absent`);
+          
+          // Write absence documents for missing students
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            for (const student of absentStudents) {
+              const absenceDoc = {
+                // Student Information
+                studentId: student.id,
+                studentName: student.name || student.fullName || `Student ${student.id}`,
+                
+                // Attendance Status
+                status: "Absent",
+                remark: "Absent",
+                remarks: "Absent",
+                
+                // Date & Time Information
+                date: dateStr,                    // ✅ Date field in nested document too
+                timestamp: new Date(),
+                timeIn: null,
+                timeOut: null,
+                
+                // Subject Information
+                subjectId: subject.id,
+                subjectName: subject.subject || subject.name || subject.id,
+                subjectCode: subject.subjectCode || subject.id,
+                
+                // System Information
+                createdBy: "system",
+                reason: "auto-generated-absence",
+                source: "dashboard-backlog-processing",
+                
+                // Additional tracking
+                dayOfWeek: weekday,
+                processed: true,
+                isAutoGenerated: true
+              };
+              
+              // Write to: attendance/{dateStr}/{subjectId}/{studentId}
+              const absenceRef = doc(db, "attendance", dateStr, subject.id, student.id);
+              await setDoc(absenceRef, absenceDoc);
+              
+              totalAbsencesWritten++;
+              console.log(`📝 [WriteAbsence] Wrote absence for student ${student.id} in subject ${subject.id} on ${dateStr}`);
+            }
+          } else {
+            console.log(`🧪 [WriteAbsence] DRY RUN: Would write ${absentStudents.length} absences for ${subject.id} on ${dateStr}`);
+            totalAbsencesWritten += absentStudents.length;
+          }
+          
+        } catch (subjectError) {
+          console.error(`📝 [WriteAbsence] Error processing subject ${subject.id} on ${dateStr}:`, subjectError);
+        }
+      }
+    }
+    
+    console.log(`✅ [WriteAbsence] Completed. Total absences written: ${totalAbsencesWritten}`);
+    return { success: true, absencesWritten: totalAbsencesWritten, datesProcessed: datesToProcess.length };
+    
+  } catch (error) {
+    console.error(`🔥 [WriteAbsence] Failed:`, error);
+    throw error;
+  }
+};
+
 const Dashboard = () => {
   const { user, loading: authLoading } = useAuth();
 
@@ -146,7 +323,7 @@ const Dashboard = () => {
     fetchUserRoleAndSubjects();
   }, [user]);
 
-  // === Dashboard Processing with streak integration ===
+  // === Dashboard Processing with AttendanceRecord logic ===
   useEffect(() => {
     console.log("🔄 [Dashboard] Starting dashboard processing...");
     
@@ -173,7 +350,10 @@ const Dashboard = () => {
         // Get current PH time
         const now = new Date();
         const phNow = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Manila" }));
-        const todayStr = `${phNow.getFullYear()}-${String(phNow.getMonth() + 1).padStart(2, "0")}-${String(phNow.getDate()).padStart(2, "0")}`;
+        const todayStr = formatDateLocal(phNow);
+        const today = new Date(phNow.getFullYear(), phNow.getMonth(), phNow.getDate());
+        const yesterday = new Date(today);
+        yesterday.setDate(today.getDate() - 1);
         
         console.log("📅 [Dashboard] Current PH date:", todayStr);
         console.log("🕐 [Dashboard] Current PH time:", phNow.toLocaleString());
@@ -186,28 +366,74 @@ const Dashboard = () => {
         
         console.log("📋 [Dashboard] Current config:", cfg);
 
-        // Handle writeAbsence and streak processing
+        // Handle writeAbsence using AttendanceRecord logic
         const storedWriteDate = cfg.writeAbsence || null;
-
         console.log("📝 [Dashboard] Write absence last run:", storedWriteDate);
 
-        // Write absence check (existing logic)
-        if (!storedWriteDate || storedWriteDate !== todayStr) {
-          console.log("⚠️ [Dashboard] Write absence needed for:", todayStr);
-          
-          if (!WRITE_ABSENCE_DRY_RUN) {
-            console.log("✍️ [Dashboard] Updating writeAbsence config...");
-            await setDoc(cfgRef, { writeAbsence: todayStr }, { merge: true });
-            console.log("✅ [Dashboard] WriteAbsence config updated successfully");
-          } else {
-            console.log("🧪 [Dashboard] DRY RUN mode - not updating writeAbsence");
+        // Convert stored date to Date object for comparison
+        let normalizedStoredDate;
+        if (storedWriteDate) {
+          normalizedStoredDate = new Date(storedWriteDate + "T00:00:00");
+          if (isNaN(normalizedStoredDate.getTime())) {
+            console.warn("📝 [Dashboard] Invalid stored date, treating as null");
+            normalizedStoredDate = null;
           }
         } else {
-          console.log("✅ [Dashboard] Write absence already done for today");
+          normalizedStoredDate = null;
         }
 
-        // Process streaks (new integration)
-        console.log("🔢 [Dashboard] Starting streak processing...");
+        console.log("📝 [Dashboard] Normalized stored date:", normalizedStoredDate);
+        console.log("📝 [Dashboard] Today:", today);
+        console.log("📝 [Dashboard] Yesterday:", yesterday);
+
+        // Determine if we need to process writeAbsence
+        let needsWriteAbsence = false;
+        let fromDate = null;
+        let toDate = null;
+
+        if (!normalizedStoredDate) {
+          console.log("📝 [Dashboard] No stored date found, processing from yesterday only");
+          needsWriteAbsence = true;
+          fromDate = yesterday;
+          toDate = yesterday;
+        } else if (normalizedStoredDate < yesterday) {
+          console.log("📝 [Dashboard] Stored date is before yesterday, processing backlog");
+          needsWriteAbsence = true;
+          // Start from the day AFTER stored date
+          fromDate = new Date(normalizedStoredDate);
+          fromDate.setDate(fromDate.getDate());
+          toDate = yesterday;
+        } else if (formatDateLocal(normalizedStoredDate) === formatDateLocal(yesterday)) {
+          console.log("📝 [Dashboard] Stored date is yesterday, already up to date");
+          needsWriteAbsence = false;
+        } else if (normalizedStoredDate >= today) {
+          console.log("📝 [Dashboard] Stored date is today or future, nothing to process");
+          needsWriteAbsence = false;
+        }
+
+        if (needsWriteAbsence) {
+          console.log(`📝 [Dashboard] Write absence needed from ${formatDateLocal(fromDate)} to ${formatDateLocal(toDate)}`);
+          
+          // ✅ Actually write absence documents using AttendanceRecord logic
+          console.log("📝 [Dashboard] Writing absence documents using AttendanceRecord logic...");
+          
+          const writeResult = await writeAbsenceDocumentsAttendanceRecord(fromDate, toDate);
+          console.log("✅ [Dashboard] Absence documents written:", writeResult);
+          
+          // Update config after successful write
+          if (!WRITE_ABSENCE_DRY_RUN) {
+            console.log("✍️ [Dashboard] Updating writeAbsence config...");
+            await setDoc(cfgRef, { writeAbsence: formatDateLocal(toDate) }, { merge: true });
+            console.log("✅ [Dashboard] WriteAbsence config updated successfully");
+          } else {
+            console.log("🧪 [Dashboard] DRY RUN mode - config not updated");
+          }
+        } else {
+          console.log("✅ [Dashboard] Write absence already up to date");
+        }
+
+        // ⚡ WAIT for writeAbsence to complete before processing streaks
+        console.log("🔢 [Dashboard] Starting streak processing (after writeAbsence completion)...");
         
         try {
           const streakResult = await processStreaksFromLastRun(user.uid);
@@ -434,12 +660,12 @@ const Dashboard = () => {
     };
   }, [user, userRole, ownedSubjectIds]); // Added dependencies for filtering
 
-  // === Chart aggregation with instructor filtering ===
+  // === Chart aggregation (NO filtering - show all data) ===
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        console.log("📈 [Dashboard] Building chart data for year:", selectedYear, "role:", userRole);
+        console.log("📈 [Dashboard] Building chart data for year:", selectedYear, "(no filtering)");
         // prepare months
         const monthShorts = [
           "Jan",
@@ -464,25 +690,11 @@ const Dashboard = () => {
 
         console.log("📈 [Dashboard] Found", dateDocs.length, "date documents for", selectedYear);
 
-        // load subject list and apply instructor filtering
+        // load subject list (NO filtering - show all subjects in chart)
         const subsSnap = await getDocs(collection(db, "subjectList"));
-        let subjectIds = subsSnap.docs.map((d) => d.id);
+        const subjectIds = subsSnap.docs.map((d) => d.id);
 
-        // Apply instructor filtering to chart data
-        if (userRole === "instructor") {
-          if (!ownedSubjectIds || ownedSubjectIds.length === 0) {
-            console.log("[Dashboard] Instructor has no owned subjects, chart will be empty");
-            subjectIds = [];
-          } else {
-            subjectIds = subjectIds.filter(subjId => {
-              const isOwned = ownedSubjectIds.includes(subjId);
-              console.log(`[Dashboard] Chart: Subject ${subjId} owned by instructor: ${isOwned}`);
-              return isOwned;
-            });
-          }
-        }
-
-        console.log("📈 [Dashboard] Processing chart for", subjectIds.length, "subjects");
+        console.log("📈 [Dashboard] Processing chart for", subjectIds.length, "subjects (all subjects)");
 
         // for each date in selected year, for each subject, count statuses
         for (const dateId of dateDocs) {
@@ -515,7 +727,7 @@ const Dashboard = () => {
         const arr = Object.values(map);
         if (!cancelled) {
           setChartData(arr);
-          console.log("📈 [Dashboard] Chart data updated for", selectedYear);
+          console.log("📈 [Dashboard] Chart data updated for", selectedYear, "(all subjects)");
         }
       } catch (err) {
         console.error("🔥 [Dashboard] Failed to build chart data:", err);
@@ -525,7 +737,7 @@ const Dashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedYear, userRole, ownedSubjectIds]); // Added dependencies for filtering
+  }, [selectedYear]); // Removed role-based filtering dependencies
 
   // helpers for rendering
   const totalsToday = useMemo(() => {
