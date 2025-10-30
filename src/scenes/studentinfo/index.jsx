@@ -15,16 +15,8 @@ const StudentInformation = () => {
   const [loadingStudent, setLoadingStudent] = useState(true);
   const [error, setError] = useState(null);
 
-  const [subjects, setSubjects] = useState([]);
-  const [selectedSubject, setSelectedSubject] = useState(location.state?.selectedSubject || "All");
-
-  // date range picker
-  const [startDate, setStartDate] = useState(location.state?.startDate || "");
-  const [endDate, setEndDate] = useState(location.state?.endDate || "");
-
-  // attendanceEntries will contain records for this student (all dates/subjects) by default
-  const [attendanceEntries, setAttendanceEntries] = useState([]);
-  const [loadingAttendance, setLoadingAttendance] = useState(false);
+  const [studentSubjects, setStudentSubjects] = useState([]);
+  const [loadingSubjects, setLoadingSubjects] = useState(false);
 
   useEffect(() => {
     if (location.state?.studentId && location.state.studentId !== studentId) {
@@ -61,113 +53,105 @@ const StudentInformation = () => {
   }, [studentId]);
 
   useEffect(() => {
-    // load subject list for filter and name lookup
     let cancelled = false;
-    const loadSubjects = async () => {
-      try {
-        const snap = await getDocs(collection(db, "subjectList"));
-        if (cancelled) return;
-        const arr = snap.docs.map((d) => ({
-          id: d.id,
-          name: d.data()?.name || d.data()?.subject || d.data()?.subjectName || d.id,
-        }));
-        setSubjects(arr);
-      } catch (err) {
-        console.warn("Failed to load subjects:", err);
-      }
-    };
-    loadSubjects();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // helper: compare date strings "YYYY-MM-DD"
-  const inRange = (dateStr, start, end) => {
-    if (!start && !end) return true;
-    const d = new Date(dateStr + "T00:00:00");
-    if (start && new Date(start + "T00:00:00") > d) return false;
-    if (end && new Date(end + "T00:00:00") < d) return false;
-    return true;
-  };
-
-  useEffect(() => {
-    // fetch ALL attendance records for this student across dates & subjects (then filters applied client-side)
-    let cancelled = false;
-    const fetchAllRecordsForStudent = async () => {
-      setLoadingAttendance(true);
-      setAttendanceEntries([]);
+    const fetchStudentSubjects = async () => {
+      setLoadingSubjects(true);
+      setStudentSubjects([]);
+      
       if (!studentId) {
-        setLoadingAttendance(false);
+        setLoadingSubjects(false);
         return;
       }
 
       try {
-        // load list of dates under attendance top-level
-        const datesSnap = await getDocs(collection(db, "attendance"));
-        const dateIds = datesSnap.docs.map((d) => d.id);
+        console.log("[StudentInfo] Fetching subjects for student:", studentId);
+        
+        // Get all subjects from subjectList collection
+        const subjectsSnap = await getDocs(collection(db, "subjectList"));
+        const enrolledSubjects = [];
 
-        // determine subject ids to check (either selected or all known)
-        const availableSubjects = subjects.length
-          ? subjects
-          : (await getDocs(collection(db, "subjectList"))).docs.map((d) => ({ id: d.id, name: d.data()?.name || d.id }));
-        const subjectIdsToCheck = selectedSubject && selectedSubject !== "All"
-          ? [selectedSubject]
-          : availableSubjects.map((s) => s.id);
+        // Check each subject to see if this student is enrolled
+        for (const subjectDoc of subjectsSnap.docs) {
+          try {
+            const subjectData = subjectDoc.data();
+            const subjectId = subjectDoc.id;
+            
+            // Check if student exists in this subject's students subcollection
+            const studentInSubjectRef = doc(db, "subjectList", subjectId, "students", String(studentId));
+            const studentInSubjectSnap = await getDoc(studentInSubjectRef);
+            
+            if (studentInSubjectSnap.exists()) {
+              // Student is enrolled in this subject
+              const enrollmentData = {
+                id: subjectId,
+                subjectCode: subjectData.subjectCode || subjectId,
+                subject: subjectData.subject || subjectData.name || "Unknown Subject",
+                program: subjectData.program || "—",
+                yearLevel: subjectData.yearLevel || "—",
+                semester: subjectData.semester || "—",
+                startTime: subjectData.startTime || "—",
+                endTime: subjectData.endTime || "—",
+                schoolYearStart: subjectData.schoolYearStart || "—",
+                schoolYearEnd: subjectData.schoolYearEnd || "—",
+                days: subjectData.days || subjectData.schedule || "—",
+                // For sorting purposes
+                sortTime: parseTime(subjectData.startTime)
+              };
+              
+              enrolledSubjects.push(enrollmentData);
+              console.log("[StudentInfo] Found enrollment in subject:", subjectId, enrollmentData);
+            }
+          } catch (err) {
+            console.warn(`[StudentInfo] Error checking subject ${subjectDoc.id}:`, err);
+          }
+        }
 
-        const records = [];
-
-        // For each date & subject, check the student doc at attendance/{date}/{subject}/{studentId}
-        await Promise.all(
-          dateIds.map(async (dateId) => {
-            if (!inRange(dateId, startDate, endDate)) return;
-            await Promise.all(
-              subjectIdsToCheck.map(async (subId) => {
-                try {
-                  const attDocRef = doc(db, "attendance", String(dateId), String(subId), String(studentId));
-                  const attSnap = await getDoc(attDocRef);
-                  if (attSnap.exists()) {
-                    const ad = attSnap.data() || {};
-                    records.push({
-                      date: dateId,
-                      subjectId: subId,
-                      subjectName: ad.subjectName || (availableSubjects.find((s) => s.id === subId)?.name) || subId,
-                      remark: ad.remark || ad.status || ad.remarks || "",
-                      time: ad.time || ad.timeIn || "",
-                      timestamp: ad.timestamp ? (ad.timestamp.toDate ? ad.timestamp.toDate().getTime() : new Date(ad.timestamp).getTime()) : null,
-                      raw: ad,
-                    });
-                  }
-                } catch (err) {
-                  // ignore per-item errors
-                }
-              })
-            );
-          })
-        );
-
-        // sort newest first by timestamp, fallback to date
-        records.sort((a, b) => {
-          const ta = a.timestamp || new Date(a.date + "T00:00:00").getTime();
-          const tb = b.timestamp || new Date(b.date + "T00:00:00").getTime();
-          return tb - ta;
+        // Sort by start time (earliest first)
+        enrolledSubjects.sort((a, b) => {
+          if (a.sortTime === null && b.sortTime === null) return 0;
+          if (a.sortTime === null) return 1; // null values go to end
+          if (b.sortTime === null) return -1;
+          return a.sortTime - b.sortTime;
         });
 
-        if (!cancelled) setAttendanceEntries(records);
+        console.log("[StudentInfo] Final enrolled subjects:", enrolledSubjects);
+        
+        if (!cancelled) {
+          setStudentSubjects(enrolledSubjects);
+        }
       } catch (err) {
-        console.error("Failed loading attendance records:", err);
-        if (!cancelled) setAttendanceEntries([]);
+        console.error("[StudentInfo] Failed to fetch student subjects:", err);
+        if (!cancelled) {
+          setStudentSubjects([]);
+        }
       } finally {
-        if (!cancelled) setLoadingAttendance(false);
+        if (!cancelled) {
+          setLoadingSubjects(false);
+        }
       }
     };
 
-    // fetch once for current student and filters (date range / subject)
-    fetchAllRecordsForStudent();
+    fetchStudentSubjects();
     return () => {
       cancelled = true;
     };
-  }, [studentId, subjects, selectedSubject, startDate, endDate]);
+  }, [studentId]);
+
+  // Helper function to parse time string to minutes for sorting
+  const parseTime = (timeStr) => {
+    if (!timeStr || timeStr === "—") return null;
+    const [hours, minutes] = timeStr.split(":").map(num => parseInt(num, 10));
+    if (isNaN(hours) || isNaN(minutes)) return null;
+    return hours * 60 + minutes;
+  };
+
+  // Helper function to format time range
+  const formatTimeRange = (startTime, endTime) => {
+    if (!startTime && !endTime) return "—";
+    if (!startTime || startTime === "—") return endTime || "—";
+    if (!endTime || endTime === "—") return startTime || "—";
+    return `${startTime} - ${endTime}`;
+  };
 
   const initials = (s) => {
     const fn = s?.firstName || "";
@@ -199,43 +183,6 @@ const StudentInformation = () => {
                 </div>
               </div>
             </div>
-
-            <div className="flex items-center gap-3">
-              <select
-                value={selectedSubject}
-                onChange={(e) => setSelectedSubject(e.target.value)}
-                className="border px-3 py-2 rounded-md bg-white"
-              >
-                <option value="All">All Subjects</option>
-                {subjects.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.id})</option>
-                ))}
-              </select>
-
-              <label className="text-sm">From</label>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-                className="border px-3 py-2 rounded-md bg-white"
-              />
-
-              <label className="text-sm">To</label>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => setEndDate(e.target.value)}
-                className="border px-3 py-2 rounded-md bg-white"
-              />
-
-              <button
-                className="ml-2 border px-3 py-2 rounded bg-gray-50"
-                onClick={() => { setStartDate(""); setEndDate(""); setSelectedSubject("All"); }}
-                title="Clear filters"
-              >
-                Clear
-              </button>
-            </div>
           </div>
 
           <section className="bg-gray-100 p-4 rounded-lg shadow mb-6">
@@ -252,32 +199,60 @@ const StudentInformation = () => {
 
           <section className="bg-white p-4 rounded-lg shadow">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Attendance records</h3>
-              <div className="text-sm text-gray-600">{loadingAttendance ? "Loading..." : `${attendanceEntries.length} record(s)`}</div>
+              <h3 className="font-semibold">Enrolled Subjects</h3>
+              <div className="text-sm text-gray-600">
+                {loadingSubjects ? "Loading..." : `${studentSubjects.length} subject(s)`}
+              </div>
             </div>
 
-            {loadingAttendance ? (
-              <div>Loading attendance...</div>
-            ) : attendanceEntries.length === 0 ? (
-              <div className="text-gray-600">No attendance records for this student (match current filters).</div>
+            {loadingSubjects ? (
+              <div className="text-center py-8 text-gray-500">Loading enrolled subjects...</div>
+            ) : studentSubjects.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">No subjects found for this student.</div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="min-w-full table-auto border border-gray-200 text-sm">
                   <thead className="bg-gray-100">
                     <tr>
-                      <th className="py-2 px-4 border">Date</th>
-                      <th className="py-2 px-4 border">Subject</th>
-                      <th className="py-2 px-4 border">Status / Remark</th>
-                      <th className="py-2 px-4 border">Time</th>
+                      <th className="py-3 px-4 border text-left">Subject Code</th>
+                      <th className="py-3 px-4 border text-left">Subject Name</th>
+                      <th className="py-3 px-4 border text-left">Program</th>
+                      <th className="py-3 px-4 border text-left">Year Level</th>
+                      <th className="py-3 px-4 border text-left">Semester</th>
+                      <th className="py-3 px-4 border text-left">Schedule</th>
+                      <th className="py-3 px-4 border text-left">School Year</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {attendanceEntries.map((e, idx) => (
-                      <tr key={idx} className="border-b hover:bg-gray-50">
-                        <td className="py-2 px-4">{e.date}</td>
-                        <td className="py-2 px-4">{e.subjectName}</td>
-                        <td className="py-2 px-4">{e.remark || "—"}</td>
-                        <td className="py-2 px-4">{e.time || (e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : "—")}</td>
+                    {studentSubjects.map((subject, idx) => (
+                      <tr key={subject.id} className="border-b hover:bg-gray-50">
+                        <td className="py-3 px-4 font-medium">
+                          <button
+                            onClick={() => navigate(`/admin/subjects/${subject.id}`)}
+                            className="text-blue-600 hover:text-blue-800 hover:underline"
+                          >
+                            {subject.subjectCode}
+                          </button>
+                        </td>
+                        <td className="py-3 px-4">{subject.subject}</td>
+                        <td className="py-3 px-4">{subject.program}</td>
+                        <td className="py-3 px-4">{subject.yearLevel}</td>
+                        <td className="py-3 px-4">{subject.semester}</td>
+                        <td className="py-3 px-4">
+                          <div>
+                            <div className="font-medium">{formatTimeRange(subject.startTime, subject.endTime)}</div>
+                            {subject.days && subject.days !== "—" && (
+                              <div className="text-xs text-gray-500">{subject.days}</div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          {subject.schoolYearStart && subject.schoolYearEnd && 
+                           subject.schoolYearStart !== "—" && subject.schoolYearEnd !== "—"
+                            ? `${subject.schoolYearStart}-${subject.schoolYearEnd}`
+                            : "—"
+                          }
+                        </td>
                       </tr>
                     ))}
                   </tbody>

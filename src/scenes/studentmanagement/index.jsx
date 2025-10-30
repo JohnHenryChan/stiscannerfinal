@@ -9,9 +9,11 @@ import AddStudent from '../../components/AddStudent';
 import ImportModal from '../../components/ImportModal';
 import ConfirmModal from '../../components/ConfirmModal';
 import { useAuth } from '../../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 const StudentManagement = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [userRole, setUserRole] = useState(null);
   const [ownedSubjectIds, setOwnedSubjectIds] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
@@ -465,7 +467,12 @@ const StudentManagement = () => {
                     )}
                     <td className="border border-black px-4 py-2">{student.id}</td>
                     <td className="border border-black px-4 py-2">
-                      {`${student.firstName || ''} ${student.lastName || ''}`}
+                      <button
+                        onClick={() => navigate(`/students/${student.id}`)}
+                        className="text-blue-600 hover:text-blue-800 hover:underline cursor-pointer"
+                      >
+                        {`${student.firstName || ''} ${student.lastName || ''}`}
+                      </button>
                     </td>
                     <td className="border border-black px-4 py-2">{student.year || student.yearLevel || 'N/A'}</td>
                     <td className="border border-black px-4 py-2">{student.rfid || "—"}</td>
