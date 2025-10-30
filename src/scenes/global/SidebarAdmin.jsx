@@ -22,7 +22,7 @@ const SidebarAdmin = () => {
       : []),
 
     // User Management (was Instructor Management) visible only to admin and registrar
-    ...(role === "admin" || role === "registrar"
+    ...(role === "admin"
       ? [{ name: "User Management", link: "/teachermanagement", icon: PiChalkboardTeacherLight }]
       : []),
 

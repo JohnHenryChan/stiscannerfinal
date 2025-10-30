@@ -77,37 +77,96 @@ const SubjectManagement = () => {
 
       // Instructor: only subjects listed in their instructor doc (no modify controls)
       try {
+        console.log("[SubjectManagement] Looking for instructor with uid:", user.uid);
+        console.log("[SubjectManagement] User object:", user);
+        
         const instructorsSnap = await getDocs(collection(db, "instructors"));
-        const instructorDoc = instructorsSnap.docs.find(
-          (d) => d.data()?.uid === user.uid || d.id === user.instructorCode || d.data()?.instructorCode === user.instructorCode
-        );
+        console.log("[SubjectManagement] Total instructors found:", instructorsSnap.docs.length);
+        
+        // Log all instructor documents for debugging
+        instructorsSnap.docs.forEach((doc, index) => {
+          const data = doc.data();
+          console.log(`[SubjectManagement] Instructor ${index}:`, {
+            id: doc.id,
+            uid: data.uid,
+            instructorCode: data.instructorCode,
+            name: data.name,
+            email: data.email,
+            subjectList: data.subjectList
+          });
+        });
+        
+        const instructorDoc = instructorsSnap.docs.find((d) => {
+          const data = d.data();
+          
+          // Primary matches (most reliable)
+          const uid_match = data?.uid === user.uid;
+          const id_match = d.id === user.uid;
+          const email_match = data?.email === user.email;
+          
+          // Secondary matches (only if both values exist and are truthy)
+          const instructor_code_match = user.instructorCode && d.id === user.instructorCode;
+          const instructor_code_data_match = user.instructorCode && data?.instructorCode && data.instructorCode === user.instructorCode;
+          
+          const matches = uid_match || id_match || email_match || instructor_code_match || instructor_code_data_match;
+          
+          console.log(`[SubjectManagement] Checking instructor ${d.id}:`, {
+            uid_match,
+            id_match,
+            email_match,
+            instructor_code_match,
+            instructor_code_data_match,
+            overall_match: matches,
+            user_uid: user.uid,
+            user_instructorCode: user.instructorCode,
+            data_uid: data?.uid,
+            data_instructorCode: data?.instructorCode
+          });
+          
+          return matches;
+        });
 
         if (!instructorDoc) {
+          console.warn("[SubjectManagement] No instructor document found for user:", user.uid);
           setSubjects([]);
           return;
         }
 
         const instructorData = instructorDoc.data();
+        console.log("[SubjectManagement] Found instructor document:", {
+          id: instructorDoc.id,
+          data: instructorData
+        });
+        
         const subjectList = Array.isArray(instructorData.subjectList)
           ? instructorData.subjectList
           : [];
 
+        console.log("[SubjectManagement] Instructor's subject list:", subjectList);
+
         if (subjectList.length === 0) {
+          console.warn("[SubjectManagement] Instructor has empty subject list");
           setSubjects([]);
           return;
         }
 
         unsubscribe = onSnapshot(collection(db, "subjectList"), (snapshot) => {
-          const filtered = snapshot.docs
-            .filter((doc) => subjectList.includes(doc.id))
-            .map((doc) => ({
-              ...doc.data(),
-              id: doc.id,
-            }));
+          console.log("[SubjectManagement] Total subjects in collection:", snapshot.docs.length);
+          
+          const filtered = snapshot.docs.filter((doc) => {
+            const isIncluded = subjectList.includes(doc.id) || subjectList.includes(doc.data().subjectCode);
+            console.log(`[SubjectManagement] Subject ${doc.id} (${doc.data().subjectCode}) included:`, isIncluded);
+            return isIncluded;
+          }).map((doc) => ({
+            ...doc.data(),
+            id: doc.id,
+          }));
+          
+          console.log("[SubjectManagement] Filtered subjects for instructor:", filtered);
           setSubjects(filtered);
         });
       } catch (err) {
-        console.warn("Failed to load instructor subjects:", err);
+        console.error("[SubjectManagement] Failed to load instructor subjects:", err);
         setSubjects([]);
       }
     };

@@ -64,6 +64,7 @@ const ClassList = () => {
   const { role } = useAuth();
   const navigate = useNavigate();
 
+  const canEditStudents = role === "admin" || role === "registrar";
   const [subjectData, setSubjectData] = useState(null);
   const [editingSubjectData, setEditingSubjectData] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -456,17 +457,21 @@ const ClassList = () => {
             )}
           </td>
           <td className="py-2 px-4 border">
-            <div className="flex justify-center gap-4">
-              <button onClick={() => handleEditStudent(student.id)} disabled={!student.valid}>
-                <FaPen className={`cursor-pointer ${student.valid ? "text-black hover:text-blue-600" : "text-gray-400 cursor-not-allowed"}`} />
-              </button>
-              <button onClick={() => handleDeleteStudentFromSubject(student.id)}>
-                <FaTrash className="text-yellow-600 hover:text-yellow-800 cursor-pointer" title="Remove from Subject" />
-              </button>
-              <button onClick={() => handleDeleteStudentFromMaster(student.id)}>
-                <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" title="Delete from Master List" />
-              </button>
-            </div>
+            {canEditStudents ? (
+              <div className="flex justify-center gap-4">
+                <button onClick={() => handleEditStudent(student.id)} disabled={!student.valid}>
+                  <FaPen className={`cursor-pointer ${student.valid ? "text-black hover:text-blue-600" : "text-gray-400 cursor-not-allowed"}`} />
+                </button>
+                <button onClick={() => handleDeleteStudentFromSubject(student.id)}>
+                  <FaTrash className="text-yellow-600 hover:text-yellow-800 cursor-pointer" title="Remove from Subject" />
+                </button>
+                <button onClick={() => handleDeleteStudentFromMaster(student.id)}>
+                  <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" title="Delete from Master List" />
+                </button>
+              </div>
+            ) : (
+              <div className="text-center text-gray-500">—</div>
+            )}
           </td>
         </tr>
       ))
@@ -772,15 +777,19 @@ const ClassList = () => {
                       <div><strong>School Year:</strong> {subjectData.schoolYearStart} - {subjectData.schoolYearEnd}</div>
                       <div className="mt-2"><strong>Instructor{assignedInstructors.length !== 1 ? "s" : ""}:</strong> {assignedInstructors.length > 0 ? assignedInstructors.map((i) => i.name || i.instructorName || i.id).join(", ") : "None assigned"}</div>
                       <div className="mt-4 flex justify-end gap-2">
-                        <button onClick={handleEditToggle} className="bg-blue-700 text-white px-4 py-2 rounded hover:bg-blue-800">
-                          <FaPen className="inline mr-2" /> Edit
-                        </button>
-                        <button
-                          className="bg-blue-700 text-white font-medium px-6 py-2 rounded-md hover:bg-blue-800"
-                          onClick={() => setShowModal(true)}
-                        >
-                          Add Student
-                        </button>
+                        {canEditStudents && (
+                          <>
+                            <button onClick={handleEditToggle} className="bg-blue-700 text-white px-4 py-2 rounded hover:bg-blue-800">
+                              <FaPen className="inline mr-2" /> Edit
+                            </button>
+                            <button
+                              className="bg-blue-700 text-white font-medium px-6 py-2 rounded-md hover:bg-blue-800"
+                              onClick={() => setShowModal(true)}
+                            >
+                              Add Student
+                            </button>
+                          </>
+                        )}
                       </div>
                     </>
                   )}
@@ -797,16 +806,52 @@ const ClassList = () => {
                 <tr>
                   <th className="py-2 px-4 border">Student ID</th>
                   <th className="py-2 px-4 border">Full Name</th>
-                  <th className="py-2 px-4 border">Actions</th>
+                  {canEditStudents && <th className="py-2 px-4 border">Actions</th>}
                 </tr>
               </thead>
               <tbody>
-                {studentRows}
-               </tbody>
+                {filteredStudents.length > 0 ? (
+                  filteredStudents.map((student) => (
+                    <tr key={student.id} className={`text-center ${!student.valid ? "bg-red-100" : ""}`}>
+                      <td className="py-2 px-4 border">{student.id}</td>
+                      <td className="py-2 px-4 border">
+                        {student.valid ? (
+                          <Link to={`/students/${student.id}`} className="text-blue hover:underline">
+                            {student.name || student.fullName || student.studentName}
+                          </Link>
+                        ) : (
+                          <span className="text-red-500 italic">{student.name || student.fullName || student.studentName}</span>
+                        )}
+                      </td>
+                      {canEditStudents && (
+                        <td className="py-2 px-4 border">
+                          <div className="flex justify-center gap-4">
+                            <button onClick={() => handleEditStudent(student.id)} disabled={!student.valid}>
+                              <FaPen className={`cursor-pointer ${student.valid ? "text-black hover:text-blue-600" : "text-gray-400 cursor-not-allowed"}`} />
+                            </button>
+                            <button onClick={() => handleDeleteStudentFromSubject(student.id)}>
+                              <FaTrash className="text-yellow-600 hover:text-yellow-800 cursor-pointer" title="Remove from Subject" />
+                            </button>
+                            <button onClick={() => handleDeleteStudentFromMaster(student.id)}>
+                              <FaTrash className="text-red-600 hover:text-red-800 cursor-pointer" title="Delete from Master List" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))
+                ) : (
+                  <tr key="no-students">
+                    <td colSpan={canEditStudents ? 3 : 2} className="py-4 border text-center text-gray-500 italic">
+                      No students found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
             </table>
           </section>
 
-          {showModal && (
+          {showModal && canEditStudents && (
             <AddStudent
               onClose={() => {
                 setShowModal(false);

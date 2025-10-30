@@ -48,6 +48,10 @@ const Dashboard = () => {
   // aggregated monthly chart data (Late, Absent, Present)
   const [chartData, setChartData] = useState([]);
 
+  // Add state for instructor filtering
+  const [userRole, setUserRole] = useState(null);
+  const [ownedSubjectIds, setOwnedSubjectIds] = useState([]);
+
   // use consistent 3-letter month abbreviations (matches chart keys)
   const months = ["All","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const years = useMemo(() => {
@@ -70,6 +74,77 @@ const Dashboard = () => {
   console.log("🚀 [Dashboard] Component rendered");
   console.log("👤 [Dashboard] Current user:", user);
   console.log("⏳ [Dashboard] Auth loading:", authLoading);
+
+  // === Fetch user role and owned subjects ===
+  useEffect(() => {
+    const fetchUserRoleAndSubjects = async () => {
+      if (!user?.uid) {
+        setUserRole(null);
+        setOwnedSubjectIds([]);
+        return;
+      }
+
+      try {
+        // Get user role from multiple possible sources
+        let role = user.role || "student";
+        let ownedIds = [];
+
+        // Check instructors collection for role and owned subjects
+        let instrDoc = await getDoc(doc(db, "instructors", user.uid));
+        
+        // Fallback: query by uid if document doesn't exist by uid
+        if (!instrDoc.exists()) {
+          const instrQuery = query(collection(db, "instructors"), where("uid", "==", user.uid));
+          const instrSnap = await getDocs(instrQuery);
+          if (!instrSnap.empty) {
+            instrDoc = instrSnap.docs[0];
+          }
+        }
+
+        if (instrDoc.exists()) {
+          const instrData = instrDoc.data();
+          role = instrData.role || "instructor";
+          
+          // Get owned subjects for instructors
+          if (role === "instructor") {
+            const subjectList = instrData.subjectList || [];
+            ownedIds = Array.isArray(subjectList) ? subjectList.map(String) : [];
+          }
+        }
+
+        // Check other role collections if not found in instructors
+        if (role === "student") {
+          // Check admins collection
+          const adminDoc = await getDoc(doc(db, "admins", user.uid));
+          if (adminDoc.exists()) {
+            role = "admin";
+          } else {
+            // Check other collections as needed
+            const guidanceDoc = await getDoc(doc(db, "guidance", user.uid));
+            if (guidanceDoc.exists()) {
+              role = "guidance";
+            }
+          }
+        }
+
+        console.log("[Dashboard] User role and subjects:", { 
+          uid: user.uid, 
+          role, 
+          ownedSubjects: ownedIds 
+        });
+
+        setUserRole(role);
+        setOwnedSubjectIds(ownedIds);
+
+      } catch (err) {
+        console.error("[Dashboard] Failed to fetch user role/subjects:", err);
+        setUserRole("student");
+        setOwnedSubjectIds([]);
+      }
+    };
+
+    fetchUserRoleAndSubjects();
+  }, [user]);
 
   // === Dashboard Processing with streak integration ===
   useEffect(() => {
@@ -161,7 +236,7 @@ const Dashboard = () => {
     runDashboardProcessing();
   }, [user, authLoading]);
 
-  // === totals ===
+  // === totals (not filtered by instructor) ===
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -186,14 +261,14 @@ const Dashboard = () => {
     };
   }, []);
 
-  // === Today's subjects + counts + latest entries ===
+  // === Today's subjects + counts + latest entries (with instructor filtering) ===
   useEffect(() => {
     let cancelled = false;
     const dateStr = getTodayDateString();
     const dayShort = getCurrentDayShort();
     const nowHHMM = getCurrentTimeHHMM();
 
-    console.log("[Dashboard] fetchToday start", { dateStr, dayShort, nowHHMM });
+    console.log("[Dashboard] fetchToday start", { dateStr, dayShort, nowHHMM, userRole, ownedSubjectIds });
 
     const normalizeStatus = (raw) => {
       if (raw == null) return "Absent";
@@ -208,11 +283,11 @@ const Dashboard = () => {
     const fetchToday = async () => {
       try {
         console.log("📚 [Dashboard] Loading today's subjects...");
-        // load all subjects and pick active ones (no role-based ownership filtering)
+        // load all subjects and pick active ones
         const subsSnap = await getDocs(collection(db, "subjectList"));
         console.log("[Dashboard] loaded subjectList count:", subsSnap.size);
 
-        const activeSubjects = [];
+        let activeSubjects = [];
         subsSnap.forEach((s) => {
           const raw = s.data() || {};
           // normalize days to array of trimmed lowercase strings for reliable matching
@@ -238,7 +313,7 @@ const Dashboard = () => {
 
           const activeFlag = raw.active !== false;
 
-          // Debug log for each subject evaluation (no ownership checks)
+          // Debug log for each subject evaluation
           console.log("[Dashboard] subject check", {
             id: s.id,
             subjectName: raw.name || raw.subject || raw.subjectName,
@@ -260,6 +335,24 @@ const Dashboard = () => {
             console.log(`[Dashboard] skipping subject ${s.id} (${raw.subject || raw.name || s.id})`, reasons.join(", "));
           }
         });
+
+        console.log("[Dashboard] activeSubjects count before instructor filtering:", activeSubjects.length);
+
+        // Apply instructor filtering (only if instructor role)
+        if (userRole === "instructor") {
+          if (!ownedSubjectIds || ownedSubjectIds.length === 0) {
+            console.log("[Dashboard] Instructor has no owned subjects, showing empty list");
+            activeSubjects = [];
+          } else {
+            activeSubjects = activeSubjects.filter(subj => {
+              const sid = String(subj.id);
+              const scode = String(subj.subjectCode || sid);
+              const isOwned = ownedSubjectIds.includes(sid) || ownedSubjectIds.includes(scode);
+              console.log(`[Dashboard] Subject ${sid} (${subj.subject || subj.name}) owned by instructor: ${isOwned}`);
+              return isOwned;
+            });
+          }
+        }
 
         console.log("[Dashboard] activeSubjects count after filtering:", activeSubjects.length);
 
@@ -331,18 +424,22 @@ const Dashboard = () => {
       }
     };
 
-    fetchToday();
+    // Only fetch when we have role information
+    if (userRole !== null) {
+      fetchToday();
+    }
+
     return () => {
       cancelled = true;
     };
-  }, [user]); // keep dependency to refresh when auth changes
+  }, [user, userRole, ownedSubjectIds]); // Added dependencies for filtering
 
-  // === Chart aggregation (simple): scan attendance date docs that belong to selectedYear and aggregate by month ===
+  // === Chart aggregation with instructor filtering ===
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        console.log("📈 [Dashboard] Building chart data for year:", selectedYear);
+        console.log("📈 [Dashboard] Building chart data for year:", selectedYear, "role:", userRole);
         // prepare months
         const monthShorts = [
           "Jan",
@@ -367,9 +464,25 @@ const Dashboard = () => {
 
         console.log("📈 [Dashboard] Found", dateDocs.length, "date documents for", selectedYear);
 
-        // load subject list once for subcollection iteration
+        // load subject list and apply instructor filtering
         const subsSnap = await getDocs(collection(db, "subjectList"));
-        const subjectIds = subsSnap.docs.map((d) => d.id);
+        let subjectIds = subsSnap.docs.map((d) => d.id);
+
+        // Apply instructor filtering to chart data
+        if (userRole === "instructor") {
+          if (!ownedSubjectIds || ownedSubjectIds.length === 0) {
+            console.log("[Dashboard] Instructor has no owned subjects, chart will be empty");
+            subjectIds = [];
+          } else {
+            subjectIds = subjectIds.filter(subjId => {
+              const isOwned = ownedSubjectIds.includes(subjId);
+              console.log(`[Dashboard] Chart: Subject ${subjId} owned by instructor: ${isOwned}`);
+              return isOwned;
+            });
+          }
+        }
+
+        console.log("📈 [Dashboard] Processing chart for", subjectIds.length, "subjects");
 
         // for each date in selected year, for each subject, count statuses
         for (const dateId of dateDocs) {
@@ -412,7 +525,7 @@ const Dashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedYear]);
+  }, [selectedYear, userRole, ownedSubjectIds]); // Added dependencies for filtering
 
   // helpers for rendering
   const totalsToday = useMemo(() => {
@@ -458,7 +571,9 @@ const Dashboard = () => {
               <h3 className="text-center font-semibold mb-3 text-gray-800">Today's Activity</h3>
               <div className="text-sm text-gray-700">
                 {todaySubjects.length === 0 ? (
-                  <div className="text-center text-gray-600">No subjects taking attendance right now.</div>
+                  <div className="text-center text-gray-600">
+                    No subjects taking attendance right now.
+                  </div>
                 ) : (
                   <ul className="space-y-3">
                     {todaySubjects.map((s) => (
@@ -484,7 +599,9 @@ const Dashboard = () => {
           <div className="grid grid-cols-1 lg:grid-cols-[2.1fr_1fr] gap-6 mb-6">
             <div className="bg-white shadow-md rounded-2xl p-6 hover:shadow-lg transition-all duration-200">
               <div className="flex justify-between items-center mb-4">
-                <h3 className="text-lg font-semibold text-gray-800">Attendance Issues Overview</h3>
+                <h3 className="text-lg font-semibold text-gray-800">
+                  Attendance Issues Overview
+                </h3>
                 <div className="flex gap-2">
                   <select
                     className="border rounded-lg px-3 py-1 text-sm text-gray-700"
@@ -528,7 +645,9 @@ const Dashboard = () => {
 
             {/* latest today's attendance entries (5 latest) */}
             <div className="bg-white shadow-md rounded-2xl p-6 flex flex-col hover:shadow-lg transition-all duration-200">
-              <h3 className="text-lg font-semibold mb-4 text-gray-800">Latest Attendance (Today)</h3>
+              <h3 className="text-lg font-semibold mb-4 text-gray-800">
+                Latest Attendance (Today)
+              </h3>
 
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm text-left border-t">
@@ -543,7 +662,9 @@ const Dashboard = () => {
                   <tbody>
                     {latestTodayEntries.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="py-4 text-center text-sm text-gray-500">No attendance records for today.</td>
+                        <td colSpan={4} className="py-4 text-center text-sm text-gray-500">
+                          No attendance records for today.
+                        </td>
                       </tr>
                     )}
                     {latestTodayEntries.map((e, idx) => (
@@ -562,7 +683,9 @@ const Dashboard = () => {
 
           {/* Attendance Overview (today totals only) */}
           <div className="bg-white shadow-md rounded-2xl p-6 hover:shadow-lg transition-all duration-200">
-            <h3 className="text-lg font-semibold mb-6 text-gray-800">Attendance Overview (Today)</h3>
+            <h3 className="text-lg font-semibold mb-6 text-gray-800">
+              Attendance Overview (Today)
+            </h3>
 
             <div className="grid grid-cols-2 md:grid-cols-4 text-center mb-6">
               <div>

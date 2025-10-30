@@ -185,20 +185,7 @@ const TopbarAdmin = () => {
       </Box>
 
       <Box display="flex" alignItems="center" sx={{ marginLeft: "auto" }}>
-        {/* Home Icon - Additional navigation option */}
-        <IconButton 
-          sx={{ 
-            color: "white",
-            "&:hover": {
-              backgroundColor: "rgba(255,255,255,0.1)"
-            }
-          }} 
-          onClick={handleLogoClick}
-          title="Go to Dashboard"
-        >
-          <HomeOutlinedIcon sx={{ fontSize: 28 }} />
-        </IconButton>
-
+        
         {/* Notification Icon with Badge - Hidden for registrars */}
         {shouldShowNotificationIcon && (
           <Box sx={{ position: "relative", marginLeft: 1 }}>

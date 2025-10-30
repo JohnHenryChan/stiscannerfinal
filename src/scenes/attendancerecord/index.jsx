@@ -161,6 +161,10 @@ const AttendanceRecord = () => {
 
         const list = Array.isArray(instrSnap?.data()?.subjectList) ? instrSnap.data().subjectList : [];
         setOwnedSubjectIds(list.map(String));
+        console.log(`[OwnedSubjects] User: ${user?.uid}, Role: ${userRole}`);
+        console.log(`[OwnedSubjects] Found instructor doc:`, instrSnap?.exists());
+        console.log(`[OwnedSubjects] Raw subjectList:`, instrSnap?.data()?.subjectList);
+        console.log(`[OwnedSubjects] Processed ownedSubjectIds:`, list);
       } catch (err) {
         console.error("[AttendanceRecord] fetchOwnedSubjectIds error:", err);
         setOwnedSubjectIds([]);
@@ -173,15 +177,27 @@ const AttendanceRecord = () => {
   // After subjects are loaded elsewhere, restrict the list for instructors using ownedSubjectIds
   useEffect(() => {
     if (userRole !== "instructor") return;
-    if (!ownedSubjectIds || ownedSubjectIds.length === 0) return;
-
+    
     setSubjectList((prev) => {
       if (!Array.isArray(prev) || prev.length === 0) return prev;
-      return prev.filter((s) => {
+      
+      // If instructor has no owned subjects, show empty list
+      if (!ownedSubjectIds || ownedSubjectIds.length === 0) {
+        console.log("[SubjectFilter] Instructor has no owned subjects, showing empty list");
+        return [];
+      }
+      
+      // Filter to only owned subjects
+      const filtered = prev.filter((s) => {
         const sid = String(s?.id || "");
         const scode = String(s?.subjectCode || sid);
-        return ownedSubjectIds.includes(sid) || ownedSubjectIds.includes(scode);
+        const isOwned = ownedSubjectIds.includes(sid) || ownedSubjectIds.includes(scode);
+        console.log(`[SubjectFilter] Subject ${sid} (${s.subject}) owned: ${isOwned}`);
+        return isOwned;
       });
+      
+      console.log(`[SubjectFilter] Filtered subjects: ${filtered.length} of ${prev.length}`);
+      return filtered;
     });
   }, [userRole, ownedSubjectIds]);
 
@@ -223,13 +239,23 @@ const AttendanceRecord = () => {
           for (const subj of subjectList) {
             const subjectId = subj.id;
 
-            // Instructors: only fetch subjects they own (by id or subjectCode)
-            if (userRole === "instructor" && ownedSubjectIds.length > 0) {
+            // Instructors: only fetch subjects they own
+            if (userRole === "instructor") {
+              // If no owned subjects, skip everything
+              if (!ownedSubjectIds || ownedSubjectIds.length === 0) {
+                console.log("[AttendanceFilter] Instructor has no owned subjects, skipping all");
+                continue;
+              }
+              
               const scode = String(subj?.subjectCode || subjectId);
               const isOwned = ownedSubjectIds.includes(subjectId) || ownedSubjectIds.includes(scode);
-              if (!isOwned) continue;
+              if (!isOwned) {
+                console.log(`[AttendanceFilter] Skipping non-owned subject: ${subjectId}`);
+                continue;
+              }
+              console.log(`[AttendanceFilter] Processing owned subject: ${subjectId}`);
             }
-
+            
             const studentSnap = await getDocs(collection(doc(db, "attendance", dateStr), subjectId));
             for (const snap of studentSnap.docs) {
               const data = snap.data();
@@ -691,7 +717,7 @@ const AttendanceRecord = () => {
                         <span className="text-sm">{subj}</span>
                       </label>
                     ))
-                  )}
+                )}
                 </div>
               )}
             </div>
@@ -922,6 +948,14 @@ const AttendanceRecord = () => {
               >
                 Next
               </button>
+            </div>
+          )}
+
+          {/* No subjects assigned info (instructor only) */}
+          {userRole === "instructor" && (!ownedSubjectIds || ownedSubjectIds.length === 0) && (
+            <div className="text-center py-8 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <p className="text-yellow-700 font-medium">No subjects assigned to your account.</p>
+              <p className="text-yellow-600 text-sm">Please contact the administrator/registrar to assign subjects to your profile.</p>
             </div>
           )}
         </div>

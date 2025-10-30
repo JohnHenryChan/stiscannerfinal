@@ -4,12 +4,16 @@ import SidebarAdmin from '../global/SidebarAdmin';
 import TopbarAdmin from '../global/TopbarAdmin';
 import { MdSearch, MdEdit, MdDelete } from "react-icons/md";
 import { db } from '../../firebaseConfig';
-import { collection, getDocs, deleteDoc, doc, query, where } from 'firebase/firestore';
+import { collection, getDocs, deleteDoc, doc, query, where, getDoc } from 'firebase/firestore';
 import AddStudent from '../../components/AddStudent';
 import ImportModal from '../../components/ImportModal';
 import ConfirmModal from '../../components/ConfirmModal';
+import { useAuth } from '../../context/AuthContext';
 
 const StudentManagement = () => {
+  const { user } = useAuth();
+  const [userRole, setUserRole] = useState(null);
+  const [ownedSubjectIds, setOwnedSubjectIds] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [students, setStudents] = useState([]);
   const [editingStudent, setEditingStudent] = useState(null);
@@ -24,16 +28,144 @@ const StudentManagement = () => {
   const [filterYear, setFilterYear] = useState("All");
   const [filterProgram, setFilterProgram] = useState("All");
 
-  // Fetch all students
+  // Check if user can edit students (only admin and registrar)
+  const canEditStudents = userRole === "admin" || userRole === "registrar";
+
+  // === Fetch user role and owned subjects ===
+  useEffect(() => {
+    const fetchUserRoleAndSubjects = async () => {
+      if (!user?.uid) {
+        setUserRole(null);
+        setOwnedSubjectIds([]);
+        return;
+      }
+
+      try {
+        // Get user role from multiple possible sources
+        let role = user.role || "student";
+        let ownedIds = [];
+
+        // Check instructors collection for role and owned subjects
+        let instrDoc = await getDoc(doc(db, "instructors", user.uid));
+        
+        // Fallback: query by uid if document doesn't exist by uid
+        if (!instrDoc.exists()) {
+          const instrQuery = query(collection(db, "instructors"), where("uid", "==", user.uid));
+          const instrSnap = await getDocs(instrQuery);
+          if (!instrSnap.empty) {
+            instrDoc = instrSnap.docs[0];
+          }
+        }
+
+        if (instrDoc.exists()) {
+          const instrData = instrDoc.data();
+          role = instrData.role || "instructor";
+          
+          // Get owned subjects for instructors
+          if (role === "instructor") {
+            const subjectList = instrData.subjectList || [];
+            ownedIds = Array.isArray(subjectList) ? subjectList.map(String) : [];
+          }
+        }
+
+        // Check other role collections if not found in instructors
+        if (role === "student") {
+          // Check admins collection
+          const adminDoc = await getDoc(doc(db, "admins", user.uid));
+          if (adminDoc.exists()) {
+            role = "admin";
+          } else {
+            // Check guidance collection
+            const guidanceDoc = await getDoc(doc(db, "guidance", user.uid));
+            if (guidanceDoc.exists()) {
+              role = "guidance";
+            } else {
+              // Check registrar collection
+              const registrarDoc = await getDoc(doc(db, "registrars", user.uid));
+              if (registrarDoc.exists()) {
+                role = "registrar";
+              }
+            }
+          }
+        }
+
+        console.log("[StudentManagement] User role and subjects:", { 
+          uid: user.uid, 
+          role, 
+          ownedSubjects: ownedIds 
+        });
+
+        setUserRole(role);
+        setOwnedSubjectIds(ownedIds);
+
+      } catch (err) {
+        console.error("[StudentManagement] Failed to fetch user role/subjects:", err);
+        setUserRole("student");
+        setOwnedSubjectIds([]);
+      }
+    };
+
+    fetchUserRoleAndSubjects();
+  }, [user]);
+
+  // Fetch students with instructor filtering
   const fetchStudents = async () => {
-    const snapshot = await getDocs(collection(db, "students"));
-    const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    setStudents(data);
+    try {
+      // If instructor with no owned subjects, return empty array
+      if (userRole === "instructor" && (!ownedSubjectIds || ownedSubjectIds.length === 0)) {
+        console.log("[StudentManagement] Instructor has no owned subjects, showing empty list");
+        setStudents([]);
+        return;
+      }
+
+      // For admin/guidance/registrar - get all students
+      if (userRole !== "instructor") {
+        const snapshot = await getDocs(collection(db, "students"));
+        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setStudents(data);
+        return;
+      }
+
+      // For instructors - get only students from their subjects
+      const studentSet = new Set();
+      
+      for (const subjectId of ownedSubjectIds) {
+        try {
+          const subjectStudentsSnap = await getDocs(collection(db, "subjectList", subjectId, "students"));
+          
+          for (const studentDoc of subjectStudentsSnap.docs) {
+            const studentId = studentDoc.id;
+            
+            // Get full student data from main students collection
+            const mainStudentDoc = await getDoc(doc(db, "students", studentId));
+            if (mainStudentDoc.exists()) {
+              const studentData = { id: studentId, ...mainStudentDoc.data() };
+              studentSet.add(JSON.stringify(studentData)); // Use JSON to avoid duplicates
+            }
+          }
+        } catch (err) {
+          console.warn(`[StudentManagement] Error fetching students for subject ${subjectId}:`, err);
+        }
+      }
+
+      // Convert back to array and parse JSON
+      const uniqueStudents = Array.from(studentSet).map(studentJson => JSON.parse(studentJson));
+      
+      console.log(`[StudentManagement] Instructor sees ${uniqueStudents.length} students from ${ownedSubjectIds.length} subjects`);
+      setStudents(uniqueStudents);
+
+    } catch (err) {
+      console.error("[StudentManagement] Error fetching students:", err);
+      setStudents([]);
+    }
   };
 
   useEffect(() => {
-    fetchStudents();
-  }, []);
+    // Only fetch when we have role information
+    if (userRole !== null) {
+      fetchStudents();
+    }
+  }, [userRole, ownedSubjectIds]);
 
   // Delete student(s) helper (deletes student doc, attendance docs, and subject subcollection references)
   const performDelete = async (items) => {
@@ -60,26 +192,28 @@ const StudentManagement = () => {
           console.warn("⚠️ [performDelete] Failed to delete attendance for", student.id, e);
         }
 
-        // 2. Delete student references from ALL subject subcollections
+        // 2. Delete student references from subject subcollections
         try {
           console.log("📚 [performDelete] Removing student from subject subcollections:", student.id);
           
-          // Get all subjects
-          const subjectsSnapshot = await getDocs(collection(db, "subjectList"));
-          console.log("📚 [performDelete] Found", subjectsSnapshot.docs.length, "subjects to check");
+          // For instructors, only remove from their own subjects
+          const subjectsToCheck = userRole === "instructor" ? ownedSubjectIds : [];
           
-          for (const subjectDoc of subjectsSnapshot.docs) {
-            const subjectId = subjectDoc.id;
-            
-            // Check if student exists in this subject's students subcollection
+          // For admin/registrar, get all subjects
+          if (userRole !== "instructor") {
+            const subjectsSnapshot = await getDocs(collection(db, "subjectList"));
+            subjectsToCheck.push(...subjectsSnapshot.docs.map(doc => doc.id));
+          }
+          
+          console.log("📚 [performDelete] Checking", subjectsToCheck.length, "subjects");
+          
+          for (const subjectId of subjectsToCheck) {
             const studentInSubjectRef = doc(db, "subjectList", subjectId, "students", student.id);
             
             try {
-              // Try to delete the student document from this subject
               await deleteDoc(studentInSubjectRef);
               console.log(`✅ [performDelete] Removed student ${student.id} from subject ${subjectId}`);
             } catch (deleteError) {
-              // Student likely doesn't exist in this subject - this is fine
               if (deleteError.code === 'not-found') {
                 console.log(`ℹ️ [performDelete] Student ${student.id} not found in subject ${subjectId} (normal)`);
               } else {
@@ -91,13 +225,15 @@ const StudentManagement = () => {
           console.error("🔥 [performDelete] Failed to remove student from subject subcollections:", student.id, e);
         }
 
-        // 3. Delete main student document
-        try {
-          console.log("👤 [performDelete] Deleting main student document:", student.id);
-          await deleteDoc(doc(db, "students", student.id));
-          console.log("✅ [performDelete] Deleted main student document:", student.id);
-        } catch (e) {
-          console.warn("⚠️ [performDelete] Failed to delete student doc", student.id, e);
+        // 3. Delete main student document (only for admin/registrar)
+        if (canEditStudents) {
+          try {
+            console.log("👤 [performDelete] Deleting main student document:", student.id);
+            await deleteDoc(doc(db, "students", student.id));
+            console.log("✅ [performDelete] Deleted main student document:", student.id);
+          } catch (e) {
+            console.warn("⚠️ [performDelete] Failed to delete student doc", student.id, e);
+          }
         }
         
         console.log("🎯 [performDelete] Completed deletion for student:", student.id);
@@ -262,31 +398,36 @@ const StudentManagement = () => {
                 {programs.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
 
-              <button
-                className={`bg-red-600 text-white px-4 py-2 rounded-md shadow-md transition ${selectedIds.size === 0 ? "opacity-50 cursor-not-allowed" : ""}`}
-
-                onClick={openBatchDelete}
-                disabled={selectedIds.size === 0}
-              >
-                Delete Selected ({selectedIds.size})
-              </button>
+              {canEditStudents && (
+                <button
+                  className={`bg-red-600 text-white px-4 py-2 rounded-md shadow-md transition ${selectedIds.size === 0 ? "opacity-50 cursor-not-allowed" : ""}`}
+                  onClick={openBatchDelete}
+                  disabled={selectedIds.size === 0}
+                >
+                  Delete Selected ({selectedIds.size})
+                </button>
+              )}
 
               <div className="flex gap-3">
-                <button
-                  className="bg-green-600 text-white px-4 py-2 rounded-md shadow-md hover:bg-green-700 transition"
-                  onClick={() => setShowImportModal(true)}
-                >
-                  Import Students
-                </button>
-                <button
-                  className="bg-[#0057A4] text-white px-4 py-2 rounded-md shadow-md hover:bg-[#004080] transition"
-                  onClick={() => {
-                    setEditingStudent(null);
-                    setShowModal(true);
-                  }}
-                >
-                  Add Student
-                </button>
+                {canEditStudents && (
+                  <>
+                    <button
+                      className="bg-green-600 text-white px-4 py-2 rounded-md shadow-md hover:bg-green-700 transition"
+                      onClick={() => setShowImportModal(true)}
+                    >
+                      Import Students
+                    </button>
+                    <button
+                      className="bg-[#0057A4] text-white px-4 py-2 rounded-md shadow-md hover:bg-[#004080] transition"
+                      onClick={() => {
+                        setEditingStudent(null);
+                        setShowModal(true);
+                      }}
+                    >
+                      Add Student
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -295,29 +436,33 @@ const StudentManagement = () => {
           <table className="w-full border-collapse border border-black">
             <thead>
               <tr className="bg-gray-200">
-                <th className="border border-black px-4 py-2">
-                  <input type="checkbox" checked={selectAll} onChange={toggleSelectAll} />
-                </th>
+                {canEditStudents && (
+                  <th className="border border-black px-4 py-2">
+                    <input type="checkbox" checked={selectAll} onChange={toggleSelectAll} />
+                  </th>
+                )}
                 <th className="border border-black px-4 py-2">Student ID</th>
                 <th className="border border-black px-4 py-2">Name</th>
                 <th className="border border-black px-4 py-2">Year</th>
                 <th className="border border-black px-4 py-2">RFID</th>
                 <th className="border border-black px-4 py-2">Contact</th>
                 <th className="border border-black px-4 py-2">Guardian</th>
-                <th className="border border-black px-4 py-2">Action</th>
+                {canEditStudents && <th className="border border-black px-4 py-2">Action</th>}
               </tr>
             </thead>
             <tbody>
               {filteredStudents.length > 0 ? (
                 filteredStudents.map((student) => (
                   <tr key={student.id} className="border border-black hover:bg-gray-50">
-                    <td className="border border-black px-4 py-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(student.id)}
-                        onChange={() => toggleRowSelection(student.id)}
-                      />
-                    </td>
+                    {canEditStudents && (
+                      <td className="border border-black px-4 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(student.id)}
+                          onChange={() => toggleRowSelection(student.id)}
+                        />
+                      </td>
+                    )}
                     <td className="border border-black px-4 py-2">{student.id}</td>
                     <td className="border border-black px-4 py-2">
                       {`${student.firstName || ''} ${student.lastName || ''}`}
@@ -328,26 +473,31 @@ const StudentManagement = () => {
                     <td className="border border-black px-4 py-2">
                       {student.guardian ? `${student.guardian} (${student.guardianContact || "—"})` : "—"}
                     </td>
-                    <td className="border border-black px-4 py-2 text-center">
-                      <button
-                        className="text-blue-600 hover:text-blue-800 mx-2"
-                        onClick={() => handleEdit(student)}
-                      >
-                        <MdEdit size={20} />
-                      </button>
-                      <button
-                        className="text-red-600 hover:text-red-800 mx-2"
-                        onClick={() => handleDelete(student)}
-                      >
-                        <MdDelete size={20} />
-                      </button>
-                    </td>
+                    {canEditStudents && (
+                      <td className="border border-black px-4 py-2 text-center">
+                        <button
+                          className="text-blue-600 hover:text-blue-800 mx-2"
+                          onClick={() => handleEdit(student)}
+                        >
+                          <MdEdit size={20} />
+                        </button>
+                        <button
+                          className="text-red-600 hover:text-red-800 mx-2"
+                          onClick={() => handleDelete(student)}
+                        >
+                          <MdDelete size={20} />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan="8" className="text-center py-4 text-gray-500 italic">
-                    No matching students found.
+                  <td colSpan={canEditStudents ? "8" : "6"} className="text-center py-4 text-gray-500 italic">
+                    {userRole === "instructor" && (!ownedSubjectIds || ownedSubjectIds.length === 0) 
+                      ? "No subjects assigned to you." 
+                      : "No matching students found."
+                    }
                   </td>
                 </tr>
               )}
@@ -355,7 +505,7 @@ const StudentManagement = () => {
           </table>
 
           {/* Add/Edit Student Modal */}
-          {showModal && (
+          {showModal && canEditStudents && (
             <AddStudent
               onClose={() => setShowModal(false)}
               onAdd={handleUpdate}
@@ -367,7 +517,7 @@ const StudentManagement = () => {
           )}
 
           {/* Import Excel Modal */}
-          {showImportModal && (
+          {showImportModal && canEditStudents && (
             <ImportModal
               onClose={() => setShowImportModal(false)}
               onImport={handleImportStudents}
