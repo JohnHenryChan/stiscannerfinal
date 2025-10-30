@@ -47,7 +47,7 @@ const LocalConfirmModal = ({
           <button
             type="button"
             onClick={onCancel}
-            disabled={confirmDisabled}
+            disabled={confirmDisabled} // ✅ Cancel disabled when process is ongoing
             aria-disabled={confirmDisabled}
             className={confirmDisabled ? cancelDisabledStyles : cancelEnabled}
           >
@@ -82,7 +82,7 @@ const PasswordResetModal = ({
   const disableUX = "opacity-60 cursor-not-allowed pointer-events-none";
   const cancelEnabled = `${baseBtn} border border-gray-300 text-gray-700 hover:bg-gray-100`;
   const cancelDisabledStyles = `${baseBtn} border border-gray-200 text-gray-400 bg-gray-100 ${disableUX}`;
-  const confirmEnabled = `${baseBtn} bg-blue-700 text-white hover:bg-blue-800`;
+  const confirmEnabled = `${baseBtn} bg-green-600 text-white hover:bg-green-700`; // ✅ Changed to green
   const confirmDisabledStyles = `${baseBtn} bg-gray-300 text-gray-600 ${disableUX}`;
 
   return (
@@ -103,7 +103,7 @@ const PasswordResetModal = ({
           <button
             type="button"
             onClick={onClose}
-            disabled={isResetting}
+            disabled={isResetting} // ✅ Cancel disabled when resetting password
             aria-disabled={isResetting}
             className={isResetting ? cancelDisabledStyles : cancelEnabled}
           >
@@ -231,9 +231,12 @@ const InstructorManagement = () => {
   };
 
   const cancelPasswordReset = () => {
-    setIsPasswordResetModalOpen(false);
-    setInstructorForPasswordReset(null);
-    setIsResettingPassword(false);
+    // ✅ Only allow cancel if not currently resetting
+    if (!isResettingPassword) {
+      setIsPasswordResetModalOpen(false);
+      setInstructorForPasswordReset(null);
+      setIsResettingPassword(false);
+    }
   };
 
   const showNotification = (type, title, message) => {
@@ -321,11 +324,14 @@ const InstructorManagement = () => {
     }
   };
 
-  // Cancel: just close modal (no safe-restore logic)
+  // Cancel: only allow if not deleting
   const cancelDelete = () => {
-    setIsDeleteModalOpen(false);
-    setInstructorToDelete(null);
-    setIsDeleting(false);
+    // ✅ Only allow cancel if not currently deleting
+    if (!isDeleting) {
+      setIsDeleteModalOpen(false);
+      setInstructorToDelete(null);
+      setIsDeleting(false);
+    }
   };
 
   // Confirm: disable both buttons, delete Auth user (if any) then Firestore doc. Log all steps.
@@ -483,7 +489,7 @@ const InstructorManagement = () => {
             message={`Are you sure you want to delete ${instructorToDelete?.name || "this user"}? (${instructorToDelete?.email || "no email"})`}
             onConfirm={confirmDelete}
             onCancel={cancelDelete}
-            confirmDisabled={isDeleting}
+            confirmDisabled={isDeleting} // ✅ Both buttons disabled when deleting
             confirmText={isDeleting ? "Deleting..." : "Confirm"}
           />
 
@@ -492,7 +498,7 @@ const InstructorManagement = () => {
             instructor={instructorForPasswordReset}
             onClose={cancelPasswordReset}
             onConfirm={confirmPasswordReset}
-            isResetting={isResettingPassword}
+            isResetting={isResettingPassword} // ✅ Both buttons disabled when resetting
           />
 
           <NotificationModal
